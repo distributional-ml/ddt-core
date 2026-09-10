@@ -1,0 +1,56 @@
+# =============================================================================
+# DDT — .gitignore
+# =============================================================================
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# --- Build artifacts ---
+build/
+dist/
+benchmarks/
+
+# --- Compiled C++ extensions (platform-specific binaries) ---
+# Users must build from source via CMakeLists.txt / setup.py
+ddt/*.pyd
+ddt/*.so
+ddt/*.pyd.bak
+ddt/*_old.pyd
+
+# --- Planning & strategy (local-only, not for public repo) ---
+.planning/
+
+# --- Synthetic data (generated, not source) ---
+synthetic_data/
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+.continue/
+*.swp
+*.swo
+*.suo
+*.user
+
+# --- OS / Misc ---
+.DS_Store
+Thumbs.db
+.env
+.ipynb_checkpoints/
+
+# --- Test / Coverage ---
+.tox/
+.coverage
+htmlcov/
+coverage.xml
+
+# --- Additional Build ---
+build_cmake/
+cmake-build-*/
+*.dylib
+
