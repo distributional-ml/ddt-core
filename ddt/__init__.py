@@ -9,7 +9,8 @@ Main API:
     DDTRegressor - scikit-learn compatible distributional regression tree
 
 Architecture:
-    Tier 1: C++17 / Pybind11 core engine (O(N + K*B) split evaluation)
+    C++ Compute Engine: C++17 / Pybind11 core engine (O(N + K*B) split evaluation)
+    Python API & Validation: Validation harnesses & statistical oracles
 """
 
 from ._estimator import DDTRegressor
@@ -20,5 +21,4 @@ __all__ = [
     "FeatureQuantizer",
     "TargetBinner",
 ]
-__version__ = "0.1.0"
-
+__version__ = "1.0.0"
