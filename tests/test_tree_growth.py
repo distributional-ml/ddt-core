@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from ddt import DDTRandomForestRegressor, DDTRegressor
+from ddt import DDTRegressor
 
 
 @pytest.fixture
@@ -76,30 +76,6 @@ def test_g4_default_matches_existing(make_data):
     np.testing.assert_array_equal(
         model_unconstrained.tree_data_["split_threshold"], model_empty_dict.tree_data_["split_threshold"]
     )
-
-
-def test_g5_forest_propagation(make_data):
-    X, y = make_data()
-    # A small forest
-    forest = DDTRandomForestRegressor(
-        n_estimators=5,
-        max_depth=4,
-        max_features=1.0,  # Ensure feature 0 is available to all trees
-        max_splits_per_feature={0: 2},
-        random_state=42,
-    )
-    forest.fit(X, y)
-
-    for tree in forest.estimators_:
-        td = tree.tree_data_
-        is_leaf = td["is_leaf"]
-        split_feat = td["split_feature_idx"][is_leaf == 0]
-
-        # In a forest, tree.tree_data_["split_feature_idx"] points to the subsampled feature index (tree-local).
-        # We need to map it back to global feature index using tree.feature_indices_
-        global_split_feat = tree.feature_indices_[split_feat]
-
-        assert np.count_nonzero(global_split_feat == 0) <= 2
 
 
 def test_g6_weighted_tree_path(make_data):

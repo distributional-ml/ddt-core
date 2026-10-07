@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from scipy.stats import t as student_t
 
-from ddt import DDTRandomForestRegressor, DDTRegressor, _ddt_core
+from ddt import DDTRegressor, _ddt_core
 
 # q=0 is excluded from the snap-grid membership checks on purpose: the kernel
 # returns the first NON-EMPTY bin at q=0 (spec section 3.2).
@@ -250,102 +250,6 @@ def test_grid_is_required(models, data):
             fq.n_bins,
             QS_BODY,
         )
-
-
-# ---------------------------------------------------------------------------
-# Forest bindings
-# ---------------------------------------------------------------------------
-def _forest_entries(forest, n_features):
-    entries = []
-    for tree in forest.estimators_:
-        idx = tree.feature_indices_
-        if len(idx) == n_features and np.array_equal(idx, np.arange(n_features)):
-            idx = None
-        entries.append((tree.tree_data_, idx))
-    return entries
-
-
-def _forest_call(fn, forest, X, q, grid):
-    fq = forest.feature_quantizer_
-    return fn(_forest_entries(forest, X.shape[1]), X, fq._flat_bin_edges_, fq._bin_offsets_, fq.n_bins, q, **grid)
-
-
-@pytest.fixture(scope="module")
-def forests(data):
-    X, y = data
-    out = {}
-    for method in ("average", "mixture"):
-        for label, kw in {
-            "plain": {},
-            "smooth_evt": dict(smooth_leaves=True, evt_tails=True, evt_min_samples=15),
-        }.items():
-            out[(method, label)] = DDTRandomForestRegressor(
-                n_estimators=4,
-                max_depth=3,
-                min_samples_leaf=100,
-                random_state=1,
-                n_jobs=1,
-                forest_quantile_method=method,
-                **kw,
-            ).fit(X, y)
-    return out
-
-
-@pytest.mark.parametrize("method", ["average", "mixture"])
-def test_forest_snap_grid_returns_exact_bin_centres(forests, data, method):
-    X, _ = data
-    f = forests[(method, "plain")]
-    fn = _ddt_core.predict_quantiles_forest_fast if method == "average" else _ddt_core.predict_quantiles_forest_mixture
-    centers = f.target_binner_.inverse_transform_bin_centers().astype(np.float64)
-    if method == "mixture":
-        out = _forest_call(fn, f, X[:200], QS_BODY, _grid(centers, "snap"))
-        assert np.all(np.isin(out, centers))
-    else:
-        # Averaging per-tree snapped quantiles need not land on a centre, but must stay in range.
-        out = _forest_call(fn, f, X[:200], QS_BODY, _grid(centers, "snap"))
-        assert out.min() >= centers.min() - 1e-12 and out.max() <= centers.max() + 1e-12
-
-
-@pytest.mark.parametrize("label", ["plain", "smooth_evt"])
-def test_forest_linear_grid_bounded_and_monotone(forests, data, label):
-    X, _ = data
-    for method, fn in (
-        ("average", _ddt_core.predict_quantiles_forest_fast),
-        ("mixture", _ddt_core.predict_quantiles_forest_mixture),
-    ):
-        f = forests[(method, label)]
-        centers = f.target_binner_.inverse_transform_bin_centers().astype(np.float64)
-        grid = _grid(centers, "linear")
-        qs = np.linspace(0.02, 0.98, 25)  # stay in the body regime (no EVT tail override)
-        out = _forest_call(fn, f, X[:150], qs, grid)
-        assert np.all(np.isfinite(out))
-        if label == "plain":  # EVT splices may legitimately break monotonicity / leave the grid
-            assert np.all(np.diff(out, axis=0) >= -1e-9)
-            lo_all = grid["bin_lo"].min()
-            hi_all = (grid["bin_lo"] + grid["bin_width"]).max()
-            assert out.min() >= lo_all - 1e-9 and out.max() <= hi_all + 1e-9
-
-
-def test_forest_mixture_single_tree_equals_tree_inversion(data):
-    """With M = 1 the mixture CDF is the tree's own CDF -> same as the leaf-entry result."""
-    X, y = data
-    f = DDTRandomForestRegressor(
-        n_estimators=1,
-        max_depth=3,
-        min_samples_leaf=100,
-        random_state=0,
-        n_jobs=1,
-        forest_quantile_method="mixture",
-        max_features=1.0,
-        bootstrap=False,
-    ).fit(X, y)
-    centers = f.target_binner_.inverse_transform_bin_centers().astype(np.float64)
-    grid = _grid(centers, "linear")
-    qs = np.array([0.0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0])
-    mix = _forest_call(_ddt_core.predict_quantiles_forest_mixture, f, X[:100], qs, grid)
-    avg = _forest_call(_ddt_core.predict_quantiles_forest_fast, f, X[:100], qs, grid)
-    # M=1: average == the single tree's inversion; mixture equals it up to CDF normalisation rounding.
-    np.testing.assert_allclose(mix, avg, rtol=0, atol=1e-8)
 
 
 # ---------------------------------------------------------------------------

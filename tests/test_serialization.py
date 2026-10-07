@@ -2,18 +2,19 @@ import pickle
 
 import numpy as np
 import pytest
-from sklearn.datasets import fetch_california_housing
+from sklearn.datasets import make_regression
 
-from ddt import DDTRandomForestRegressor, DDTRegressor
+from ddt import DDTRegressor
+
+_MODEL_CLASSES = [DDTRegressor]
 
 
 @pytest.fixture(scope="module")
 def data():
-    X, y = fetch_california_housing(return_X_y=True)
-    return X[:500], y[:500]
+    return make_regression(n_samples=500, n_features=8, noise=10.0, random_state=42)
 
 
-@pytest.mark.parametrize("model_cls", [DDTRegressor, DDTRandomForestRegressor])
+@pytest.mark.parametrize("model_cls", _MODEL_CLASSES)
 @pytest.mark.parametrize(
     "config",
     [
@@ -27,17 +28,8 @@ def data():
 )
 def test_serialization_roundtrip(data, model_cls, config):
     X, y = data
-    # Forest doesn't support fast_inference directly yet, skip or use compact_inference
-    if model_cls == DDTRandomForestRegressor and config.get("fast_inference"):
-        pytest.skip("Forest doesn't support fast_inference yet")
 
     kwargs = dict(max_depth=4, n_target_bins=16, **config)
-
-    if model_cls == DDTRandomForestRegressor:
-        kwargs.pop("evt_tails_lower", None)
-        kwargs.pop("calibration_fraction", None)
-        kwargs.pop("fast_inference", None)
-        kwargs["n_estimators"] = 5
 
     # random_state is standard on Forest but not on DDTRegressor natively
     if "random_state" in model_cls.__init__.__code__.co_varnames:
