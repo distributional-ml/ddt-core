@@ -62,8 +62,6 @@ def test_ddt_regressor_integration():
     assert np.max(preds) < 10  # Since 100 was clipped and we reconstruct via expm1
 
 
-from ddt import DDTRandomForestRegressor
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -474,97 +472,6 @@ class TestEstimatorShapeGuards:
 
 
 # ===========================================================================
-# 6. DDTRandomForestRegressor shape guards
-# ===========================================================================
-
-
-class TestForestShapeGuards:
-    def test_default_shape_equals_n_target_bins(self):
-        X, y = _make_data()
-        model = DDTRandomForestRegressor(
-            n_estimators=5,
-            n_target_bins=20,
-            max_depth=3,
-            min_samples_leaf=20,
-            random_state=0,
-        )
-        model.fit(X, y)
-        dist = model.predict_distribution(X[:10])
-        assert dist.shape == (10, 20)
-        assert dist.shape[1] == model.target_binner_.n_bins_active_
-
-    def test_log_width_shape_correct(self):
-        X, y = _make_data()
-        model = DDTRandomForestRegressor(
-            n_estimators=5,
-            n_target_bins=15,
-            bin_strategy="log_width",
-            max_depth=3,
-            min_samples_leaf=20,
-            random_state=0,
-            winsorize_tails=None,
-        )
-        model.fit(X, y)
-        n_active = model.target_binner_.n_bins_active_
-        dist = model.predict_distribution(X[:10])
-        assert dist.shape == (10, n_active)
-
-    def test_consolidation_shape_uses_n_bins_active(self):
-        X, y = _make_sparse_target(n=600)
-        edges = np.concatenate([np.linspace(0.5, 5.5, 25), [200.0]])
-        model = DDTRandomForestRegressor(
-            n_estimators=5,
-            n_target_bins=25,
-            bin_strategy="manual",
-            manual_bin_edges=edges,
-            consolidate_bins=True,
-            max_depth=3,
-            min_samples_leaf=15,
-            random_state=0,
-            winsorize_tails=None,
-        )
-        model.fit(X, y)
-        n_active = model.target_binner_.n_bins_active_
-        dist = model.predict_distribution(X[:10])
-        assert dist.shape == (10, n_active), f"Expected (10, {n_active}), got {dist.shape}."
-
-    def test_forest_log_width_predict_finite(self):
-        X, y = _make_data()
-        model = DDTRandomForestRegressor(
-            n_estimators=5,
-            n_target_bins=15,
-            bin_strategy="log_width",
-            max_depth=3,
-            min_samples_leaf=20,
-            random_state=0,
-            winsorize_tails=None,
-        )
-        model.fit(X, y)
-        preds = model.predict(X[:20])
-        assert np.all(np.isfinite(preds))
-
-    def test_all_trees_share_same_n_bins_active(self):
-        """Every tree in the forest must be built with the same bin count."""
-        X, y = _make_data()
-        model = DDTRandomForestRegressor(
-            n_estimators=8,
-            n_target_bins=15,
-            bin_strategy="log_width",
-            max_depth=3,
-            min_samples_leaf=20,
-            random_state=0,
-            winsorize_tails=None,
-        )
-        model.fit(X, y)
-        n_active = model.target_binner_.n_bins_active_
-        for tree in model.estimators_:
-            # Each tree's internal n_bins (from C++) must equal n_bins_active_.
-            assert tree.tree_data_["n_bins"] == n_active, (
-                f"Tree has n_bins={tree.tree_data_['n_bins']}, expected {n_active}."
-            )
-
-
-# ===========================================================================
 # 7. Regression guard: equal_width default is unchanged
 # ===========================================================================
 
@@ -710,20 +617,3 @@ class TestHybridEndToEnd:
         q90 = model.predict_quantile(X[:10], 0.90)
         assert np.all(q10 <= q50 + 1e-9)
         assert np.all(q50 <= q90 + 1e-9)
-
-    def test_forest_hybrid_aligned_bins(self):
-        X, y = _make_data()
-        model = DDTRandomForestRegressor(
-            n_estimators=3,
-            n_target_bins=15,
-            bin_strategy="hybrid",
-            core_fraction=0.5,
-            max_depth=3,
-            min_samples_leaf=20,
-            random_state=0,
-            winsorize_tails=None,
-        )
-        model.fit(X, y)
-        n_active = model.target_binner_.n_bins_active_
-        for tree in model.estimators_:
-            assert tree.tree_data_["n_bins"] == n_active

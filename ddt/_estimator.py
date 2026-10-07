@@ -467,8 +467,6 @@ class DDTRegressor(
                 if self.evt_tail_fraction_lower is not None
                 else self.evt_tail_fraction,
                 fit_lower_tail=bool(getattr(self, "evt_tails_lower", False)),
-                evt_borrow_factor=float(getattr(self, "evt_borrow_factor", 1.0)),
-                evt_gof_alpha=float(getattr(self, "evt_gof_alpha", 0.05)),
             )
             self.tree_data_.update(evt_params)
             self.evt_active_ = True

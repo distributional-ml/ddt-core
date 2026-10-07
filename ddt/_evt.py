@@ -240,6 +240,7 @@ def fit_all_leaf_gpds(
     X_q: np.ndarray,
     min_samples: int = 30,
     tail_fraction: float = 0.05,
+    tail_fraction_lower: float = 0.05,
     fit_lower_tail: bool = False,
 ) -> dict:
     """
@@ -351,7 +352,7 @@ def fit_all_leaf_gpds(
             lower_params = fit_gpd_lower_tail(
                 leaf_values,
                 min_evt_samples=min_samples,
-                tail_fraction=tail_fraction,
+                tail_fraction=tail_fraction_lower,
             )
             evt_status_lower[leaf_idx] = lower_params["status"]
             if lower_params["status"] == EVT_STATUS_OK:
