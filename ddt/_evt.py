@@ -19,6 +19,8 @@ Design:
     Lower tail is independently gated by evt_tails_lower=True.
 """
 
+from __future__ import annotations
+
 import logging
 
 import numpy as np

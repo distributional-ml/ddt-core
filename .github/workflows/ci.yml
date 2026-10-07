@@ -10,6 +10,7 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ['3.9', '3.11', '3.13']
@@ -26,7 +27,7 @@ jobs:
         python -m build
         python -c "import glob, subprocess, sys; wheel = glob.glob('dist/*.whl')[0]; subprocess.check_call([sys.executable, '-m', 'pip', 'install', wheel + '[dev]'])"
     - name: Verify installed package and native extension
-      run: python -I -c "import ddt; from ddt import _ddt_core; print(ddt.__version__, ddt.__file__, _ddt_core.__file__)"
+      run: python -I -c "import ddt; from ddt import _ddt_core, _evt; print(ddt.__version__, ddt.__file__, _ddt_core.__file__)"
     - name: Lint with ruff
       run: |
         ruff check .
