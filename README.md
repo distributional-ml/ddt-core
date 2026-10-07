@@ -8,7 +8,7 @@ Unlike standard decision trees that predict a single scalar mean, DDTs predict t
 - **Distributional Prediction:** Full probability mass functions (PMFs) at every leaf.
 - **Extreme Value Theory (EVT) Tails:** Automatically fits Generalized Pareto Distributions (GPD) to the upper and lower tails for robust extrapolation beyond the training data.
 - **Dirichlet Smoothing:** Regularizes leaf distributions using a hierarchical prior, ensuring smooth density estimates even in sparse regions.
-- **Wasserstein Splits:** Uses the scale-normalised 1-Wasserstein distance between child target distributions (gain = (B/R)·W₁, unweighted by child size by default; see `split_weighting`). Note that with `target_transform="log1p"` it is measured on the transformed scale.
+- **Wasserstein Splits:** Uses the Wasserstein-1 metric for split criteria, optimizing directly for distributional fidelity.
 - **Fast C++ Engine:** Highly optimized C++ core for both training and inference.
 
 ## Quickstart
