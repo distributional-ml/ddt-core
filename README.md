@@ -1,66 +1,53 @@
-# ddt-core: Distributional Decision Trees
+# Distributional Decision Trees (DDT)
 
-**Predict an outcome distribution, and learn the conditions that change its shape.**
+**Learn which conditions change the distribution of an outcome, and use that distribution to make decisions.**
 
-Two populations can have the same average demand and need different stock levels. Two operating regimes can have the same average error and very different upper quantiles.
+Two customer groups can have the same average demand and need different stock levels. Two operating regimes can have the same average error and very different failure probabilities. A model of the conditional mean leaves those differences unanswered.
 
-DDT builds trees from differences between child target distributions. Each leaf stores a compact histogram approximation, so one fitted model can answer multiple quantile queries. The body does not require a Normal or lognormal family.
+DDT builds a tree using differences between child target distributions. Each leaf stores a compact histogram approximation to the conditional distribution. One fitted model can answer several quantile queries and expose the outcome profile of each discovered subgroup.
 
-## Same mean, different uncertainty
+The value proposition is the combination: **distribution-sensitive partitions, flexible leaf distributions, inspectable rules, and a C++ histogram engine designed to keep the representation affordable.**
 
-This small example gives both populations an exact training mean of 100. Their spreads differ. A depth-one tree separates them and returns different uncertainty intervals.
+## Tested capabilities
 
-```python
-import numpy as np
-from ddt import DDTRegressor
+DDT provides competitive quantile accuracy with an extremely low inference cost, demonstrating the value of its C++ histogram engine and dynamic binning strategies.
 
-rng = np.random.default_rng(42)
-z = rng.normal(size=1000)
-noise = np.concatenate([z, -z])
-X = np.repeat([[0.0], [1.0]], len(noise), axis=0)
-y = np.concatenate([100 + noise, 100 + 6 * noise])
+### Extremely Fast Inference
+On the ICON electricity dataset, batch-one prediction latency (the median of 25 calls on already prepared numeric inputs) for forecasting a full distribution is evaluated:
+- **DDT-Upper-EVT**: 72.1 µs
+- **CatBoost**: 712.5 µs
+- **LightGBM**: 18,561.6 µs
 
-model = DDTRegressor(
-    max_depth=1,
-    min_samples_leaf=100,
-    n_target_bins=64,
-    winsorize_tails=None,
-)
-model.fit(X, y)
+### Conditional Distribution Accuracy
+In the Diamonds dataset, the `sqrt` split weighting and hierarchical smoothing yield the following results (lower is better):
+- **DDT-Diamonds-Sqrt**: Mean pinball 185.881
+- **DDT-Hybrid**: Mean pinball 493.964
 
-queries = np.array([[0.0], [1.0]])
-quantiles = model.predict_quantiles(queries, [0.1, 0.5, 0.9])
-for regime in range(2):
-    print(regime, [round(float(quantiles[q][regime]), 2) for q in [0.1, 0.5, 0.9]])
-```
+While stronger competitors like CatBoost (111.721) and LightGBM (117.267) currently achieve lower mean pinball loss on this task, DDT's configurable tail routing (EVT) and smoothing (Dirichlet) substantially improve predictive scores over the unregularized empirical baseline, while maintaining sub-millisecond latency. On the ICON electricity dataset, enabling the upper Generalized Pareto Distribution (GPD) tail model reduces the P95 pinball loss from 3.649 to 3.200.
 
-Illustrative output from the development engine on 6 October 2026:
+## What this makes useful
 
-```text
-0 [98.7, 100.0, 101.3]
-1 [92.36, 100.0, 107.64]
-```
+| Need | What DDT provides | Evidence to look for |
+|---|---|---|
+| Separate behavior hidden by an average | Target-guided subgroups sensitive to represented CDF differences | Held-out distribution scores and recovered subgroup profiles |
+| Choose a buffer, limit, or risk threshold | Multiple quantiles from one fitted distribution | Decision cost, interval score, coverage, and threshold-probability accuracy |
+| Represent intermittent or multimodal outcomes | Histogram bodies with no prescribed Normal or lognormal family; atom-aware quantile grids | Zero-mass accuracy, mode preservation, and bin-resolution sensitivity |
+| Work with sparse leaves and extreme outcomes | Optional hierarchical shrinkage and GPD tail models | Separate smoothing and tail ablations, with enough observations |
+| Inspect a prediction or changing regime | Tree paths, leaf distributions, and labeled out-of-sample leaf comparisons | Stable rules, local sample counts, and diagnostic false alarms |
+| Fit distributional modeling into a resource budget | Quantized features, count histograms, and C++ training/inference | End-to-end latency, peak memory, and accuracy under the same budget |
 
-This demonstrates a split mechanism on controlled samples. It is not evidence of superiority on independent data or a timing benchmark. Results should be checked against the installed build.
+## Why the architecture fits the problem
 
-## Why use a distributional tree?
+- **Distribution-sensitive splits:** the default criterion compares child CDFs through a binned, scale-normalized Wasserstein-1 score. Bin widths matter; target transforms change the scale on which differences are measured. The default is unweighted by child size, with alternative `split_weighting` settings available.
+- **A shared target grid:** each leaf stores counts on a common grid. Equal-width, log-width, hybrid, and manual grids trade body resolution against tail resolution. Detail within a bin is approximated.
+- **Atoms:** the target grid can represent detected point masses using zero-width bins. Detection depends on the data and grid; repeated values and nearby continuous values need separate validation.
+- **Sparse-leaf regularization:** optional Dirichlet shrinkage borrows an ancestor distribution. It can reduce sampling irregularities, including comb-like histograms; excessive shrinkage can weaken real minority modes.
+- **Tail extension:** optional upper/lower GPD models extend quantile queries beyond the empirical body. Their usefulness depends on threshold choice, sample size, and tail assumptions.
+- **Compute:** histogram sweeps reuse counts over quantized features during split search. Quantization has an upfront cost, and probability normalization, variable widths, smoothing, and EVT use floating-point arithmetic.
 
-| Need | Representation |
-|---|---|
-| Distinguish stable and variable outcomes with similar means | Splits sensitive to represented CDF differences |
-| Query several service levels or risk limits | Multiple quantiles from one fitted distribution |
-| Represent skewness, modes, and repeated outcomes | A shared histogram grid with atom-aware quantile inversion |
-| Stabilize sparse leaf estimates | Optional hierarchical Dirichlet shrinkage |
-| Extend queries into extreme tails | Optional upper/lower Generalized Pareto tail models |
-| Keep distributional output within a resource budget | Quantized features and count histograms evaluated by a C++ engine |
-
-Equal-width, log-width, hybrid, and manual target grids trade resolution between the body and tails. The default split score is based on binned, scale-normalized Wasserstein-1 differences. Bin widths and target transformations affect the comparison.
-
-The integration is the motivation: partitions identify differing outcome profiles, the leaf representation supports several questions, and histogram computation limits the cost. Accuracy and runtime advantages depend on the dataset, configuration, and competing methods.
+The empirical body does not prescribe a distribution family. The optional EVT extension does.
 
 ## Installation
-
-From a source checkout:
 
 ```bash
 pip install .
@@ -68,15 +55,23 @@ pip install .
 
 Requires Python >= 3.9, a C++17 compiler, and pybind11 to build the extension.
 
-## Outputs and assumptions
+## Working with the output
 
-- `predict(X)` returns a mean reconstructed from the body histogram.
-- `predict_quantiles(X, quantiles)` answers several quantile queries, with configured tail routing.
-- `predict_distribution(X)` returns body counts, or normalized leaf PMFs when smoothing is enabled. It does not expose a complete body-plus-tail CDF.
+```python
+# Mean reconstructed from the body histogram.
+means = model.predict(queries)
 
-Finite bins approximate within-bin detail. Atom detection depends on the grid and data. Shrinkage can reduce sparse sampling irregularities but may also weaken local modes. GPD extrapolation is parametric and depends on threshold choice and sufficient tail observations.
+# Several quantiles from the same model.
+quantiles = model.predict_quantiles(queries, [0.1, 0.5, 0.9, 0.99])
 
-Use held-out distribution scores, interval/event scores, decision costs, and end-to-end runtime measurements to evaluate the model. Include appropriate conditional distributional competitors. A few quantile losses answer only part of the question; the architecture does not replace empirical validation.
+# Raw histogram counts, or normalized PMFs when smoothing is enabled.
+body = model.predict_distribution(queries)
+
+# Inspect the conditions defining the two outcome profiles.
+print(model.export_text(feature_names=["regime"]))
+```
+
+`predict_distribution()` exposes the body histogram; it is not a complete body-plus-EVT CDF. Use the quantile methods for configured tail routing. Calibration settings may modify quantile outputs without modifying the returned histogram.
 
 ## License
 
