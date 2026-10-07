@@ -17,22 +17,32 @@ def _build_inputs(n_samples=400_000, n_features=16, n_bins=64, seed=0):
 
 
 def _count_ticks_while_running(fn):
-    """Run ``fn`` in a worker thread; return (main-thread ticks, worker seconds)."""
+    """Count observer wake-ups strictly inside the worker's call interval."""
     box = {}
+    start = threading.Event()
 
     def worker():
-        t0 = time.perf_counter()
-        box["result"] = fn()
-        box["elapsed"] = time.perf_counter() - t0
+        start.wait()
+        box["started"] = time.perf_counter()
+        try:
+            box["result"] = fn()
+        except BaseException as exc:
+            box["error"] = exc
+        finally:
+            box["finished"] = time.perf_counter()
 
     thread = threading.Thread(target=worker)
-    ticks = 0
+    wakeups = []
     thread.start()
+    start.set()
     while thread.is_alive():
         time.sleep(0.001)
-        ticks += 1
+        wakeups.append(time.perf_counter())
     thread.join()
-    return ticks, box["elapsed"], box["result"]
+    if "error" in box:
+        raise box["error"]
+    ticks = sum(box["started"] < tick < box["finished"] for tick in wakeups)
+    return ticks, box["finished"] - box["started"], box["result"]
 
 
 def test_build_tree_releases_gil():
@@ -45,9 +55,10 @@ def test_build_tree_releases_gil():
     ticks, elapsed, tree = _count_ticks_while_running(build)
 
     assert elapsed > 0.05, "workload too small to measure GIL release"
-    # With the GIL held the main thread would stall for the full call (~0-2 ticks).
-    # With the GIL released it ticks at roughly the sleep rate.
-    assert ticks >= max(10, int(elapsed * 100)), (
+    # Require repeated Python progress during the call, not a fixed wake-up rate.
+    # Windows timers and shared CI runners can substantially overshoot sleep(0.001).
+    # Holding the GIL prevents sustained observer progress during native compute.
+    assert ticks >= 3, (
         f"main thread only ticked {ticks} times during a {elapsed:.2f}s native call; the GIL appears to be held"
     )
     assert tree["is_leaf"].shape[0] > 1

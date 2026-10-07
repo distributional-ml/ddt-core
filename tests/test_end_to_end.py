@@ -44,7 +44,7 @@ def test_e2e_synthetic_groups():
     q10 = model.predict_quantile(test_X, 0.10)
     q50 = model.predict_quantile(test_X, 0.50)
     q90 = model.predict_quantile(test_X, 0.90)
-    means = model.predict(test_X)
+    model.predict(test_X)
 
     # Group 0: Normal, low variance. P10 to P90 should be tight relative to Group 1.
     assert q90[0] - q10[0] < 12

@@ -16,7 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.16.2
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          CIBW_SKIP: "pp* *-musllinux_* *-win32 *_i686"
+          CIBW_BEFORE_BUILD: "pip install pybind11"
+          CIBW_TEST_REQUIRES: "pytest pandas"
+          CIBW_TEST_COMMAND: "python -I -c \"import ddt; from ddt import _ddt_core\" && cd {project}/tests && python -m pytest . -q"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}

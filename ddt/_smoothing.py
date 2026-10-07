@@ -1,5 +1,5 @@
 """
-DDT Smoothing — Hierarchical Empirical Bayes (Dirichlet) Leaf Regularisation
+DDT Smoothing — Hierarchical Empirical Bayes (Dirichlet) Leaf Regularisation.
 =============================================================================
 Post-build shrinkage of sparse leaf PMFs toward their parent's (or ancestor's)
 more stable distribution. Implements the Dirichlet-Multinomial conjugate model

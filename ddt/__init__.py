@@ -1,12 +1,12 @@
 """
-Distributional Decision Trees (DDT)
+Distributional Decision Trees (DDT).
 ====================================
-A non-parametric machine learning framework that preserves full Empirical
-Cumulative Distribution Functions (ECDF) in terminal leaves by maximizing
-1D Wasserstein distance during tree construction.
+A histogram-based machine learning framework that models conditional target distributions
+with compact histograms in terminal leaves by maximizing
+scale-normalised 1-Wasserstein distance between child target distributions (gain = (B/R)·W₁, unweighted by child size by default; see `split_weighting`). Note that with `target_transform="log1p"` it is measured on the transformed scale.
 
 Main API:
-    DDTRegressor - scikit-learn compatible distributional regression tree
+    DDTRegressor - distributional regression tree (scikit-learn compatible in tested versions)
 
 Architecture:
     C++ Compute Engine: C++17 / Pybind11 core engine (O(N + K*B) split evaluation)
@@ -21,4 +21,4 @@ __all__ = [
     "FeatureQuantizer",
     "TargetBinner",
 ]
-__version__ = "1.0.0"
+__version__ = "1.1.0"

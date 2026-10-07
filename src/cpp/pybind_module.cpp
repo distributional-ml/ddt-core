@@ -226,6 +226,7 @@ static GridHolder parse_grid(const DoubleArr& bin_lo, const DoubleArr& bin_width
 // predict_quantiles_* bindings to skip per-call array conversion / validation.
 // Non-copyable: grid pointers refer to the owned vectors.
 class CompiledGrid {
+public:
     CompiledGrid(const DoubleArr& bin_lo, const DoubleArr& bin_width, const DoubleArr& bin_rep)
     {
         GridHolder h = parse_grid(bin_lo, bin_width, bin_rep, /*max_B=*/-1);
@@ -252,6 +253,87 @@ class CompiledGrid {
     int B = 0;
 };
 
+// -----------------------------------------------------------------------------
+// native-boundary validation shared by every fast-inference binding.
+// All checks run before the GIL is released; they raise instead of reading out
+// of bounds.
+// -----------------------------------------------------------------------------
+
+// quantiles in [0, 1] (NaN rejected) and, for binned paths, bin_offsets/bin_edges
+// consistent with X.shape[1].
+static void check_fast_inputs(
+    int n_features,
+    const py::array_t<double, py::array::c_style | py::array::forcecast>& quantiles,
+    const py::array_t<double, py::array::c_style | py::array::forcecast>* bin_edges,
+    const py::array_t<int32_t, py::array::c_style | py::array::forcecast>* bin_offsets,
+    int max_bins)
+{
+    const double* q = quantiles.data();
+    for (py::ssize_t i = 0; i < quantiles.shape(0); ++i)
+        if (!(q[i] >= 0.0 && q[i] <= 1.0))
+            throw std::invalid_argument("quantiles must lie in [0, 1]");
+
+    if (bin_offsets == nullptr || bin_edges == nullptr) return;
+    if (max_bins < 1)
+        throw std::invalid_argument("max_bins must be >= 1");
+    if (bin_offsets->shape(0) != static_cast<py::ssize_t>(n_features) + 1)
+        throw std::invalid_argument(
+            "bin_offsets must have length X.shape[1] + 1 (got " +
+            std::to_string(bin_offsets->shape(0)) + " for " +
+            std::to_string(n_features) + " features)");
+    const int32_t* off = bin_offsets->data();
+    const py::ssize_t n_edges = bin_edges->shape(0);
+    if (off[0] < 0)
+        throw std::invalid_argument("bin_offsets must be non-negative");
+    for (int f = 0; f < n_features; ++f)
+        if (off[f + 1] < off[f])
+            throw std::invalid_argument("bin_offsets must be non-decreasing");
+    if (off[n_features] > n_edges)
+        throw std::invalid_argument("bin_offsets exceed the length of bin_edges");
+}
+
+// Internal nodes must reference a split feature in [0, n_feat_limit) and children
+// in [0, n_nodes).
+static void check_tree_topology(const py::dict& d, int n_feat_limit)
+{
+    auto is_leaf = d["is_leaf"].cast<py::array_t<uint8_t, py::array::c_style | py::array::forcecast>>();
+    auto sfeat   = d["split_feature_idx"].cast<py::array_t<int32_t, py::array::c_style | py::array::forcecast>>();
+    auto lch     = d["left_child_id"].cast<py::array_t<int32_t, py::array::c_style | py::array::forcecast>>();
+    auto rch     = d["right_child_id"].cast<py::array_t<int32_t, py::array::c_style | py::array::forcecast>>();
+    const py::ssize_t n_nodes = is_leaf.shape(0);
+    if (sfeat.shape(0) < n_nodes || lch.shape(0) < n_nodes || rch.shape(0) < n_nodes)
+        throw std::invalid_argument("tree arrays have inconsistent lengths");
+    const uint8_t* il = is_leaf.data();
+    const int32_t* sf = sfeat.data();
+    const int32_t* lc = lch.data();
+    const int32_t* rc = rch.data();
+    for (py::ssize_t i = 0; i < n_nodes; ++i) {
+        if (il[i]) continue;
+        if (sf[i] < 0 || sf[i] >= n_feat_limit)
+            throw std::invalid_argument(
+                "split_feature_idx[" + std::to_string(i) + "] = " + std::to_string(sf[i]) +
+                " is out of range for X with " + std::to_string(n_feat_limit) + " features");
+        if (lc[i] < 0 || lc[i] >= n_nodes || rc[i] < 0 || rc[i] >= n_nodes)
+            throw std::invalid_argument(
+                "child id of node " + std::to_string(i) + " is out of range");
+    }
+}
+
+static void py_check_forest_entry(const py::dict& d, const int32_t* feat_idx,
+                                  int n_tree_features, int n_features_global)
+{
+    if (feat_idx != nullptr) {
+        for (int i = 0; i < n_tree_features; ++i)
+            if (feat_idx[i] < 0 || feat_idx[i] >= n_features_global)
+                throw std::invalid_argument(
+                    "feature_indices[" + std::to_string(i) + "] = " +
+                    std::to_string(feat_idx[i]) + " is out of range for X with " +
+                    std::to_string(n_features_global) + " features");
+        check_tree_topology(d, n_tree_features);
+    } else {
+        check_tree_topology(d, n_features_global);
+    }
+}
 
 static py::dict py_build_tree(
     py::array_t<uint8_t, py::array::c_style | py::array::forcecast> X,
@@ -261,8 +343,10 @@ static py::dict py_build_tree(
     int min_samples_leaf,
     double min_divergence_decrease,
     const std::string& divergence_name,
-    py::object max_splits_obj)  // Phase 5: optional int32 array, or None
+    py::object max_splits_obj,  // Phase 5: optional int32 array, or None
+    const std::string& split_weighting_name)  // 'none' | 'sqrt' | 'crps'
 {
+    const ddt::SplitWeighting split_weighting = ddt::parse_split_weighting(split_weighting_name);
     if (X.ndim() != 2) throw std::invalid_argument("X must be a 2D array (N x F)");
     if (y.ndim() != 1) throw std::invalid_argument("y must be a 1D array (N,)");
 
@@ -295,7 +379,7 @@ static py::dict py_build_tree(
         return ddt::build_tree(
             X_acc.data(0, 0), y_acc.data(0), n_samples, n_features, n_bins,
             max_depth, min_samples_leaf, min_divergence_decrease,
-            divergence_name, max_splits_ptr
+            divergence_name, max_splits_ptr, split_weighting
         );
     }();
 
@@ -311,8 +395,10 @@ static py::dict py_build_tree_weighted(
     int min_samples_leaf,
     double min_divergence_decrease,
     const std::string& divergence_name,
-    py::object max_splits_obj)  // Phase 5: optional int32 array, or None
+    py::object max_splits_obj,  // Phase 5: optional int32 array, or None
+    const std::string& split_weighting_name)  // 'none' | 'sqrt' | 'crps'
 {
+    const ddt::SplitWeighting split_weighting = ddt::parse_split_weighting(split_weighting_name);
     if (X.ndim() != 2) throw std::invalid_argument("X must be a 2D array (N x F)");
     if (y.ndim() != 1) throw std::invalid_argument("y must be a 1D array (N,)");
     if (delta_x_norm.ndim() != 1) throw std::invalid_argument("delta_x_norm must be 1D");
@@ -347,7 +433,7 @@ static py::dict py_build_tree_weighted(
         return ddt::build_tree_weighted(
             X_acc.data(0, 0), y_acc.data(0), n_samples, n_features, n_bins,
             max_depth, min_samples_leaf, min_divergence_decrease,
-            divergence_name, dx_acc.data(0), max_splits_ptr_w
+            divergence_name, dx_acc.data(0), max_splits_ptr_w, split_weighting
         );
     }();
 
@@ -515,6 +601,8 @@ static py::array_t<double> py_predict_quantiles_fast(
     const int n_features = static_cast<int>(X.shape(1));
     const int num_quantiles = static_cast<int>(quantiles.shape(0));
 
+    check_fast_inputs(n_features, quantiles, &bin_edges, &bin_offsets, max_bins);
+    check_tree_topology(tree_data, n_features);
     ddt::TreeView tree = py_to_tree_view(tree_data);
     cg.check(tree.n_bins);
     const ddt::QuantileGrid& grid = cg.grid;
@@ -566,6 +654,8 @@ static py::array_t<double> py_predict_quantiles_fast_float(
     const int n_features = static_cast<int>(X.shape(1));
     const int num_quantiles = static_cast<int>(quantiles.shape(0));
 
+    check_fast_inputs(n_features, quantiles, nullptr, nullptr, 1);
+    check_tree_topology(tree_data, n_features);
     ddt::TreeViewFloat tree = py_to_tree_view_float(tree_data);
     gh.check(tree.n_bins);
     const int n_target_bins = gh.B;
@@ -694,6 +784,8 @@ static py::array_t<double> py_predict_quantiles_fast_smooth(
     const int n_features    = static_cast<int>(X.shape(1));
     const int num_quantiles = static_cast<int>(quantiles.shape(0));
 
+    check_fast_inputs(n_features, quantiles, &bin_edges, &bin_offsets, max_bins);
+    check_tree_topology(tree_data, n_features);
     ddt::TreeViewSmooth tree = py_to_tree_view_smooth(tree_data, pmf_arr);
     gh.check(tree.n_bins);
     const int n_target_bins = gh.B;
@@ -873,7 +965,8 @@ PYBIND11_MODULE(_ddt_core, m) {
         py::arg("max_depth") = 10, py::arg("min_samples_leaf") = 20,
         py::arg("min_divergence_decrease") = 0.01,
         py::arg("divergence") = "wasserstein",
-        py::arg("max_splits_per_feature") = py::none());
+        py::arg("max_splits_per_feature") = py::none(),
+        py::arg("split_weighting") = "none");
 
     m.def("build_tree_weighted", &py_build_tree_weighted,
         py::arg("X"), py::arg("y"), py::arg("delta_x_norm"), py::arg("n_bins"),
@@ -881,6 +974,7 @@ PYBIND11_MODULE(_ddt_core, m) {
         py::arg("min_divergence_decrease") = 0.01,
         py::arg("divergence") = "wasserstein",
         py::arg("max_splits_per_feature") = py::none(),
+        py::arg("split_weighting") = "none",
         R"doc(
         Build a DDT tree using variable-width bin Wasserstein (weighted path).
 
@@ -1050,6 +1144,8 @@ PYBIND11_MODULE(_ddt_core, m) {
             const int n_features    = static_cast<int>(X.shape(1));
             const int num_quantiles = static_cast<int>(quantiles.shape(0));
 
+            check_fast_inputs(n_features, quantiles, &bin_edges, &bin_offsets, max_bins);
+            check_tree_topology(tree_data, n_features);
             ddt::TreeViewEVT tree = py_to_tree_view_evt(tree_data);
             gh.check(tree.n_bins);
             const int n_target_bins = gh.B;
@@ -1141,6 +1237,8 @@ PYBIND11_MODULE(_ddt_core, m) {
             const int n_features    = static_cast<int>(X.shape(1));
             const int num_quantiles = static_cast<int>(quantiles.shape(0));
 
+            check_fast_inputs(n_features, quantiles, &bin_edges, &bin_offsets, max_bins);
+            check_tree_topology(tree_data, n_features);
             ddt::TreeViewSmoothEVT tree = py_to_tree_view_smooth_evt(tree_data, pmf_arr);
             gh.check(tree.n_bins);
             const int n_target_bins = gh.B;
@@ -1194,7 +1292,7 @@ PYBIND11_MODULE(_ddt_core, m) {
         Returns ndarray float64 (Q, N).
         )doc");
 
-    
+
     // =========================================================================
     //     // =========================================================================
 

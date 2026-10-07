@@ -1,5 +1,5 @@
 """
-DDT Preprocessor — Feature Quantization & Target Binning
+DDT Preprocessor — Feature Quantization & Target Binning.
 =========================================================
 Handles FR-CORE-01 (double discretization) and FR-CORE-02 (boundary clamping).
 

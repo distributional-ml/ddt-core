@@ -1,5 +1,5 @@
 """
-DDT Conservation Law Tests — Wall 1 Validation
+DDT Conservation Law Tests — Wall 1 Validation.
 ================================================
 Verifies strict physical conservation laws that must hold across
 all node splits (FR-VAL-01):

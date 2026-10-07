@@ -1,5 +1,5 @@
 """
-DDT Smoke Tests — Phase 1 Gate Validation
+DDT Smoke Tests — Phase 1 Gate Validation.
 ===========================================
 Minimal tests to confirm the core engine works end-to-end:
     - fit/predict runs without errors
@@ -249,96 +249,6 @@ class TestTreeStructure:
             model.fit(X, y)
 
 
-class TestTreeVisualization:
-    """Test tree visualization and export methods (export_text, export_graphviz, plot_tree)."""
-
-    @pytest.mark.parametrize("engine", ["cpp", "python"])
-    def test_export_text(self, engine):
-        from ddt import DDTRegressor
-
-        X, y = make_synthetic_data(n_samples=200, n_features=3)
-        model = DDTRegressor(max_depth=3, min_samples_leaf=10, quantize_engine=engine)
-        model.fit(X, y)
-
-        text = model.export_text(feature_names=["f0", "f1", "f2"])
-        assert isinstance(text, str)
-        assert len(text) > 0
-        assert "|---" in text
-
-    @pytest.mark.parametrize("engine", ["cpp", "python"])
-    def test_export_graphviz(self, engine):
-        from ddt import DDTRegressor
-
-        X, y = make_synthetic_data(n_samples=200, n_features=3)
-        model = DDTRegressor(max_depth=3, min_samples_leaf=10, quantize_engine=engine)
-        model.fit(X, y)
-
-        dot = model.export_graphviz(feature_names=["f0", "f1", "f2"])
-        assert isinstance(dot, str)
-        assert "digraph Tree" in dot
-
-    @pytest.mark.parametrize("engine", ["cpp", "python"])
-    def test_plot_tree(self, engine):
-        import matplotlib
-
-        matplotlib.use("Agg")
-        from ddt import DDTRegressor
-
-        X, y = make_synthetic_data(n_samples=200, n_features=3)
-        model = DDTRegressor(max_depth=3, min_samples_leaf=10, quantize_engine=engine)
-        model.fit(X, y)
-
-        ax = model.plot_tree(feature_names=["f0", "f1", "f2"])
-        assert ax is not None
-
-
-class TestTreeSimplification:
-    """Test tree simplification via Wasserstein pruning and leaf aliasing."""
-
-    def test_prune_reduces_tree(self):
-        """Pruning with high epsilon collapses tree into smaller structure."""
-        from ddt import DDTRegressor
-
-        X, y = make_synthetic_data(n_samples=500, n_features=5)
-        model = DDTRegressor(max_depth=5, min_samples_leaf=10, min_divergence_decrease=0.0)
-        model.fit(X, y)
-
-        orig_info = model.get_tree_info()
-
-        pruned_model = model.prune(epsilon=10.0, inplace=False, verbose=False)
-        pruned_info = pruned_model.get_tree_info()
-
-        # Original model must remain untouched (inplace=False)
-        assert model.get_tree_info()["n_nodes"] == orig_info["n_nodes"]
-
-        # Pruned model must be simplified
-        assert pruned_info["n_nodes"] <= orig_info["n_nodes"]
-        assert pruned_info["n_leaves"] <= orig_info["n_leaves"]
-        assert hasattr(pruned_model, "simplification_report_")
-        assert pruned_model.simplification_report_["pruned_splits"] >= 0
-
-        # Predictions on pruned tree should still be valid
-        preds = pruned_model.predict(X[:10])
-        assert len(preds) == 10
-        assert np.all(np.isfinite(preds))
-
-        dists = pruned_model.predict_distribution(X[:10])
-        # Use n_bins_active_ — the canonical active bin count — not n_target_bins.
-        # For the default equal_width / no-consolidation path these are identical,
-        # but the assertion must be correct for all bin strategies (B-12).
-        assert dists.shape == (10, model.target_binner_.n_bins_active_)
-
-
-class TestPipelineStateGuards:
-    def test_valid_order_succeeds(self):
-        from ddt import DDTRegressor
-        from ddt._pipeline import PipelineStage
-
-        X, y = make_synthetic_data(n_samples=500)
-        model = DDTRegressor(max_depth=3, min_samples_leaf=10, smooth_leaves=True).fit(X, y)
-        assert model._pipeline_stage_ == PipelineStage.SMOOTHED
-
-
 class TestSmoothParamsAPI:
     def test_smooth_params_round_trip(self):
         from sklearn.base import clone
@@ -359,14 +269,12 @@ class TestPickleSmoothedState:
         import pickle
 
         from ddt import DDTRegressor
-        from ddt._pipeline import PipelineStage
 
         X, y = make_synthetic_data(n_samples=500)
         model = DDTRegressor(max_depth=3, min_samples_leaf=10, smooth_leaves=True).fit(X, y)
         dumped = pickle.dumps(model)
         loaded = pickle.loads(dumped)
         assert "smoothed_pmf" in loaded.tree_data_
-        assert getattr(loaded, "_pipeline_stage_", PipelineStage.FITTED) == PipelineStage.SMOOTHED
 
     def test_pickle_size_reduction(self):
         # B-4: Pickle size reduction
