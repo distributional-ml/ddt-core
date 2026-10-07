@@ -24,5 +24,6 @@ wheels/
 .installed.cfg
 *.egg
 
-# pytest
+# pytest / linter
 .pytest_cache/
+.ruff_cache/
