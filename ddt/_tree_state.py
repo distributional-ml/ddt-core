@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Optional
 
 import numpy as np
 
@@ -21,35 +20,35 @@ class TreeState:
     split_threshold: np.ndarray  # uint8,   (n_nodes,)
     left_child_id: np.ndarray  # int32,   (n_nodes,)
     right_child_id: np.ndarray  # int32,   (n_nodes,)
-    distribution_counts: Optional[np.ndarray]  # int32,   (n_nodes, n_bins)
+    distribution_counts: np.ndarray | None  # int32,   (n_nodes, n_bins)
     n_bins: int
 
     # ---- Optional: metadata (may be stripped by __getstate__) ----
-    wasserstein_gain: Optional[np.ndarray] = None  # float64, (n_nodes,)
-    depth: Optional[np.ndarray] = None  # int32,   (n_nodes,)
-    total_samples: Optional[np.ndarray] = None  # int32,   (n_nodes,)
+    wasserstein_gain: np.ndarray | None = None  # float64, (n_nodes,)
+    depth: np.ndarray | None = None  # int32,   (n_nodes,)
+    total_samples: np.ndarray | None = None  # int32,   (n_nodes,)
 
     # ---- Optional: float-split fast path ----
-    split_threshold_float: Optional[np.ndarray] = None  # float64, (n_nodes,)
+    split_threshold_float: np.ndarray | None = None  # float64, (n_nodes,)
 
     # ---- Optional: smoothed PMF (mutually exclusive storage) ----
-    smoothed_pmf: Optional[np.ndarray] = None  # float64, (n_nodes, n_bins)
-    inference_pmf: Optional[np.ndarray] = None  # float16/32, (n_nodes, n_bins)
+    smoothed_pmf: np.ndarray | None = None  # float64, (n_nodes, n_bins)
+    inference_pmf: np.ndarray | None = None  # float16/32, (n_nodes, n_bins)
 
     # ---- Optional: EVT upper tail ----
-    evt_enabled: Optional[np.ndarray] = None  # uint8,   (n_nodes,)
-    evt_threshold_u: Optional[np.ndarray] = None  # float64, (n_nodes,)
-    evt_F_u: Optional[np.ndarray] = None  # float64, (n_nodes,)
-    evt_S_u: Optional[np.ndarray] = None  # float64, (n_nodes,)
-    evt_gpd_shape: Optional[np.ndarray] = None  # float64, (n_nodes,)
-    evt_gpd_scale: Optional[np.ndarray] = None  # float64, (n_nodes,)
+    evt_enabled: np.ndarray | None = None  # uint8,   (n_nodes,)
+    evt_threshold_u: np.ndarray | None = None  # float64, (n_nodes,)
+    evt_F_u: np.ndarray | None = None  # float64, (n_nodes,)
+    evt_S_u: np.ndarray | None = None  # float64, (n_nodes,)
+    evt_gpd_shape: np.ndarray | None = None  # float64, (n_nodes,)
+    evt_gpd_scale: np.ndarray | None = None  # float64, (n_nodes,)
 
     # ---- Optional: EVT lower tail ----
-    evt_lower_enabled: Optional[np.ndarray] = None  # uint8, (n_nodes,)
-    evt_lower_threshold_u: Optional[np.ndarray] = None  # float64
-    evt_lower_F_u: Optional[np.ndarray] = None  # float64
-    evt_lower_gpd_shape: Optional[np.ndarray] = None  # float64
-    evt_lower_gpd_scale: Optional[np.ndarray] = None  # float64
+    evt_lower_enabled: np.ndarray | None = None  # uint8, (n_nodes,)
+    evt_lower_threshold_u: np.ndarray | None = None  # float64
+    evt_lower_F_u: np.ndarray | None = None  # float64
+    evt_lower_gpd_shape: np.ndarray | None = None  # float64
+    evt_lower_gpd_scale: np.ndarray | None = None  # float64
 
     # ---- Pipeline stage ----
     pipeline_stage: int = 0  # PipelineStage enum value
@@ -74,7 +73,7 @@ class TreeState:
     def has_float_threshold(self) -> bool:
         return self.split_threshold_float is not None
 
-    def get_active_pmf(self) -> Optional[np.ndarray]:
+    def get_active_pmf(self) -> np.ndarray | None:
         """Return the active PMF array (smoothed or inference), or None."""
         if self.smoothed_pmf is not None:
             return self.smoothed_pmf

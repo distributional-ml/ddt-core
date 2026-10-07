@@ -26,7 +26,9 @@ SplitResult find_best_split(
     int n_bins,
     int min_samples_leaf,
     SplitWorkspace& ws,
-    const char* feature_mask)  // Phase 5: nullable; when non-null, skip features where mask[f]==0
+    const char* feature_mask,  // Phase 5: nullable; when non-null, skip features where mask[f]==0
+    SplitWeighting split_weighting,
+    int n_root)
 {
     SplitResult best;
     
@@ -51,7 +53,8 @@ SplitResult find_best_split(
         
         for (int f = 0; f < n_features; ++f) {
             uint8_t fval = X_data[static_cast<size_t>(idx) * n_features + f];
-            ws.mark_dirty(f, fval);  //             int offset = (f * K + fval) * B + bin;
+            ws.mark_dirty(f, fval);
+            int offset = (f * K + fval) * B + bin;
             ws.feature_hists[offset]++;
             ws.feature_totals[f * K + fval]++;
         }
@@ -89,7 +92,8 @@ SplitResult find_best_split(
             }
 
             // Compute Divergence
-            double gain = wasserstein_1d(ws.left_hist.data(), n_left, ws.right_hist.data(), n_right, B);
+            double gain = split_gain(split_weighting, ws.left_hist.data(), n_left,
+                                     ws.right_hist.data(), n_right, nullptr, B, n_root);
 
             if (gain > best.gain) {
                 best.gain = gain;
@@ -153,7 +157,9 @@ int build_node_impl(
     SplitWorkspace& ws,
     int current_depth,
     int* feature_split_counts,         // Phase 5: nullable
-    const int* max_splits_per_feature) // Phase 5: nullable
+    const int* max_splits_per_feature, // Phase 5: nullable
+    SplitWeighting split_weighting,
+    int n_root)                        // root sample count (Crps normalisation)
 {
     const int N = end - start;
     int node_id = tree.add_node(current_depth);
@@ -182,7 +188,8 @@ int build_node_impl(
         // Unweighted path: delegate to find_best_split (uses workspace internally).
         best = find_best_split(
             X_data, y_data, sample_buf + start, N,
-            n_features, tree.n_bins, min_samples_leaf, ws, feature_mask
+            n_features, tree.n_bins, min_samples_leaf, ws, feature_mask,
+            split_weighting, n_root
         );
     } else {
         // Weighted path: inline split search (ws.delta_x_norm already set by caller).
@@ -199,7 +206,8 @@ int build_node_impl(
             ws.root_hist[bin]++;
             for (int f = 0; f < n_features; ++f) {
                 uint8_t fval = X_data[static_cast<size_t>(idx) * n_features + f];
-                ws.mark_dirty(f, fval);  //                 int offset = (f * K + fval) * B + bin;
+                ws.mark_dirty(f, fval);
+                int offset = (f * K + fval) * B + bin;
                 ws.feature_hists[offset]++;
                 ws.feature_totals[f * K + fval]++;
             }
@@ -228,10 +236,11 @@ int build_node_impl(
                 for (int b = 0; b < B; ++b)
                     ws.right_hist[b] = ws.root_hist[b] - ws.left_hist[b];
 
-                double gain = wasserstein_1d_weighted(
+                double gain = split_gain(
+                    split_weighting,
                     ws.left_hist.data(), n_left,
                     ws.right_hist.data(), n_right,
-                    ws.delta_x_norm, B
+                    ws.delta_x_norm, B, n_root
                 );
 
                 if (gain > best.gain) {
@@ -277,13 +286,15 @@ int build_node_impl(
         tree, X_data, y_data, sample_buf, start, mid,
         n_features, max_depth, min_samples_leaf,
         min_divergence_decrease, ws, current_depth + 1,
-        feature_split_counts, max_splits_per_feature
+        feature_split_counts, max_splits_per_feature,
+        split_weighting, n_root
     );
     int right_id = build_node_impl<Weighted>(
         tree, X_data, y_data, sample_buf, mid, end,
         n_features, max_depth, min_samples_leaf,
         min_divergence_decrease, ws, current_depth + 1,
-        feature_split_counts, max_splits_per_feature
+        feature_split_counts, max_splits_per_feature,
+        split_weighting, n_root
     );
 
     tree.left_child_id[node_id] = left_id;
@@ -303,7 +314,8 @@ Tree build_tree(
     int min_samples_leaf,
     double min_divergence_decrease,
     const std::string& divergence_name,
-    const int* max_splits_per_feature)  // Phase 5: nullable
+    const int* max_splits_per_feature,  // Phase 5: nullable
+    SplitWeighting split_weighting)
 {
     if (n_samples <= 0 || n_features <= 0 || n_bins <= 0 || min_samples_leaf <= 0) {
         throw std::invalid_argument("Invalid positive argument requirement.");
@@ -315,7 +327,7 @@ Tree build_tree(
     Tree tree(n_bins);
     tree.reserve(static_cast<size_t>(2 * n_samples / min_samples_leaf + 1));
 
-    //     std::vector<int> sample_buf(n_samples);
+    std::vector<int> sample_buf(n_samples);
     std::iota(sample_buf.begin(), sample_buf.end(), 0);
 
     // Phase 5: allocate per-feature split counter (heap-once, shared through recursion).
@@ -333,7 +345,8 @@ Tree build_tree(
         tree, X_data, y_data, sample_buf.data(), 0, n_samples,
         n_features, max_depth, min_samples_leaf,
         min_divergence_decrease, ws, 0,
-        split_counts_ptr, max_splits_per_feature
+        split_counts_ptr, max_splits_per_feature,
+        split_weighting, n_samples
     );
 
     return tree;
@@ -357,7 +370,8 @@ Tree build_tree_weighted(
     double min_divergence_decrease,
     const std::string& divergence_name,
     const double* delta_x_norm,
-    const int* max_splits_per_feature)  // Phase 5: nullable
+    const int* max_splits_per_feature,  // Phase 5: nullable
+    SplitWeighting split_weighting)
 {
     if (n_samples <= 0 || n_features <= 0 || n_bins <= 0 || min_samples_leaf <= 0) {
         throw std::invalid_argument("Invalid positive argument requirement.");
@@ -372,7 +386,7 @@ Tree build_tree_weighted(
     Tree tree(n_bins);
     tree.reserve(static_cast<size_t>(2 * n_samples / min_samples_leaf + 1));
 
-    //     std::vector<int> sample_buf(n_samples);
+    std::vector<int> sample_buf(n_samples);
     std::iota(sample_buf.begin(), sample_buf.end(), 0);
 
     // Phase 5: allocate per-feature split counter.
@@ -391,7 +405,8 @@ Tree build_tree_weighted(
         tree, X_data, y_data, sample_buf.data(), 0, n_samples,
         n_features, max_depth, min_samples_leaf,
         min_divergence_decrease, ws, 0,
-        split_counts_ptr_w, max_splits_per_feature
+        split_counts_ptr_w, max_splits_per_feature,
+        split_weighting, n_samples
     );
 
     return tree;

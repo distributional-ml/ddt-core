@@ -1,5 +1,5 @@
 """
-DDT Estimator — Scikit-Learn Compatible Wrapper
+DDT Estimator — Scikit-Learn Compatible Wrapper.
 =================================================
 DDTRegressor implements sklearn's BaseEstimator and RegressorMixin APIs,
 providing fit(X, y) / predict(X) / predict_distribution(X) methods.
@@ -17,10 +17,16 @@ for full scikit-learn pipeline compatibility (cross-validation, GridSearchCV, et
 import logging
 import platform
 import subprocess
+import warnings
 
 import numpy as np
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
+
+
+class ConformalResolutionWarning(UserWarning):
+    pass
+
 
 from ._preprocessor import FeatureQuantizer, TargetBinner
 from ._tree_state import TreeState
@@ -35,8 +41,8 @@ class DDTRegressor(
     """
     Distributional Decision Tree Regressor.
 
-    A non-parametric regression tree that preserves full empirical
-    cumulative distribution functions (ECDF) in terminal leaves by
+    A histogram-based regression tree that models conditional target distributions
+    with compact histograms in terminal leaves by
     maximizing 1D Wasserstein distance (Earth Mover's Distance) between
     child distributions at each split.
 
@@ -46,8 +52,8 @@ class DDTRegressor(
 
     Parameters
     ----------
-    max_depth : int, default=10
-        Maximum depth of the tree. Set to 0 for unlimited depth.
+    max_depth : int or None, default=10
+        Maximum depth of the tree. Set to 0 or None for unlimited depth.
 
     min_samples_leaf : int, default=20
         Minimum number of samples required in each leaf node.
@@ -71,9 +77,9 @@ class DDTRegressor(
     winsorize_tails : float, default=1e-4
         Fraction of data to clip from both tails of the target distribution
         prior to binning (e.g. 0.001 clips the 0.1th and 99.9th percentiles).
-        This protects the equal-width bin boundaries from being stretched
-        by extreme outliers, preventing the core data from collapsing into
-        a single bin. Set to None to disable.
+        This affects only the body bin grid; EVT always observes the raw `y`
+        values (i.e. EVT threshold `u` can exceed `winsorize_upper_`).
+        Set to None to disable.
 
     bin_strategy : str, default="equal_width"
         Bin edge strategy for the target. Options:
@@ -175,17 +181,24 @@ class DDTRegressor(
         calibration_order_by=None,
         calibration_order_asc=True,
         calibration_mode="marginal",
+        calibration_strict=False,
+        hybrid_min_calib=50,
         evt_tails=False,
         evt_tails_lower=False,
         evt_min_samples=30,
-        evt_tail_fraction=0.05,
+        evt_tail_fraction="auto",
+        evt_tail_fraction_lower=None,
         smooth_leaves=False,
         smooth_prior_weight=None,
         smooth_min_samples=None,
         compact_inference=False,
         fast_inference=False,
         max_splits_per_feature=None,
+        split_weighting="crps",
         quantile_interpolation="linear",
+        atom_threshold=0.9,
+        evt_borrow_factor=1.0,
+        evt_gof_alpha=0.05,
     ):
         self.max_depth = max_depth
         self.min_samples_leaf = min_samples_leaf
@@ -200,23 +213,38 @@ class DDTRegressor(
         self.n_feature_bins = n_feature_bins
         self.divergence = divergence
         self.quantize_engine = quantize_engine
+        self.atom_threshold = atom_threshold
         self.calibration_fraction = calibration_fraction
         self.calibration_order_by = calibration_order_by
         self.calibration_order_asc = calibration_order_asc
         self.calibration_mode = calibration_mode
+        self.calibration_strict = calibration_strict
+        self.hybrid_min_calib = hybrid_min_calib
         self.evt_tails = evt_tails
         self.evt_tails_lower = evt_tails_lower
         self.evt_min_samples = evt_min_samples
         self.evt_tail_fraction = evt_tail_fraction
+        self.evt_tail_fraction_lower = evt_tail_fraction_lower
+        self.evt_borrow_factor = evt_borrow_factor
+        self.evt_gof_alpha = evt_gof_alpha
         self.smooth_leaves = smooth_leaves
         self.smooth_prior_weight = smooth_prior_weight
         self.smooth_min_samples = smooth_min_samples
         self.compact_inference = compact_inference
         self.fast_inference = fast_inference
         self.max_splits_per_feature = max_splits_per_feature
+        self.split_weighting = split_weighting
         self.quantile_interpolation = quantile_interpolation
 
     def fit(self, X, y):
+        if self.evt_tail_fraction != "auto" and not (0 < float(self.evt_tail_fraction) < 0.5):
+            raise ValueError(f"evt_tail_fraction must be 'auto' or in (0, 0.5), got {self.evt_tail_fraction}")
+        if self.evt_tail_fraction_lower is not None:
+            if self.evt_tail_fraction_lower != "auto" and not (0 < float(self.evt_tail_fraction_lower) < 0.5):
+                raise ValueError(
+                    f"evt_tail_fraction_lower must be 'auto' or in (0, 0.5), got {self.evt_tail_fraction_lower}"
+                )
+
         """
         Build a distributional decision tree from training data.
 
@@ -250,6 +278,20 @@ class DDTRegressor(
         from sklearn.utils.validation import check_X_y
 
         from . import _ddt_core
+
+        for attr in [
+            "X_calib_",
+            "y_calib_",
+            "_calib_leaves_",
+            "calibration_shifts_",
+            "_Q_cal_",
+            "evt_active_",
+            "evt_lower_active_",
+            "pipeline_stage_",
+            "split_threshold_float_",
+        ]:
+            if hasattr(self, attr):
+                delattr(self, attr)
 
         X_orig = X
         if hasattr(self, "_validate_data"):
@@ -330,6 +372,7 @@ class DDTRegressor(
             ),
             core_fraction=self.core_fraction,
             consolidate_bins=self.consolidate_bins,
+            atom_threshold=self.atom_threshold,
         )
         y_q = self.target_binner_.fit_transform(y_train)
 
@@ -370,28 +413,31 @@ class DDTRegressor(
                     raise ValueError(f"max_splits_per_feature key {feat_idx} is out of range for {n_feat} features.")
                 max_splits_arr[feat_idx] = int(limit)
 
+        _c_max_depth = self.max_depth if self.max_depth is not None else 0
         if use_weighted:
             tree_dict = _ddt_core.build_tree_weighted(
                 X=X_q,
                 y=y_q,
                 delta_x_norm=np.ascontiguousarray(self.target_binner_.delta_x_norm_, dtype=np.float64),
                 n_bins=n_bins_active,
-                max_depth=self.max_depth,
+                max_depth=_c_max_depth,
                 min_samples_leaf=self.min_samples_leaf,
                 min_divergence_decrease=self.min_divergence_decrease,
                 divergence=self.divergence,
                 max_splits_per_feature=max_splits_arr,
+                split_weighting=self.split_weighting,
             )
         else:
             tree_dict = _ddt_core.build_tree(
                 X=X_q,
                 y=y_q,
                 n_bins=n_bins_active,
-                max_depth=self.max_depth,
+                max_depth=_c_max_depth,
                 min_samples_leaf=self.min_samples_leaf,
                 min_divergence_decrease=self.min_divergence_decrease,
                 divergence=self.divergence,
                 max_splits_per_feature=max_splits_arr,
+                split_weighting=self.split_weighting,
             )
 
         # Ensure numpy-owned copies (break capsule dependency)
@@ -417,11 +463,17 @@ class DDTRegressor(
                 X_q=X_q,
                 min_samples=self.evt_min_samples,
                 tail_fraction=self.evt_tail_fraction,
+                tail_fraction_lower=self.evt_tail_fraction_lower
+                if self.evt_tail_fraction_lower is not None
+                else self.evt_tail_fraction,
                 fit_lower_tail=bool(getattr(self, "evt_tails_lower", False)),
                 evt_borrow_factor=float(getattr(self, "evt_borrow_factor", 1.0)),
                 evt_gof_alpha=float(getattr(self, "evt_gof_alpha", 0.05)),
             )
             self.tree_data_.update(evt_params)
+            self.evt_active_ = True
+            if getattr(self, "evt_tails_lower", False):
+                self.evt_lower_active_ = True
 
         # Cache structural metadata so we can safely drop extraneous arrays during pickling
         self.tree_max_depth_ = int(np.max(self.tree_data_.get("depth", [0])))
@@ -544,12 +596,64 @@ class DDTRegressor(
             X_q_calib = self._preprocess_X(self.X_calib_)
             self._calib_leaves_ = _ddt_core.predict_leaves(self.tree_data_, X_q_calib)
 
+            # Pre-compute Q_cal grid and shifts per group (Phase 3)
+            Q_cal = [0.001, 0.0025, 0.005] + np.arange(0.01, 0.991, 0.01).tolist() + [0.995, 0.9975, 0.999]
+            Q_cal = np.array(Q_cal)
+            self._Q_cal_ = Q_cal
+            self.calibration_shifts_ = {}
+            self.calibration_counts_ = {}
+
+            route = self._inference_route()
+            calib_preds = route.from_leaves(self._calib_leaves_, Q_cal)
+
+            def compute_shifts_for_group(y_group, mask, group_name):
+                n = len(y_group)
+                self.calibration_counts_[group_name] = n
+                s_raw = np.zeros(len(Q_cal))
+
+                for i, q in enumerate(Q_cal):
+                    r = np.sort(y_group - calib_preds[q][mask])
+                    k = int(np.ceil((n + 1) * q)) if q >= 0.5 else int(np.floor((n + 1) * q))
+                    if 1 <= k <= n:
+                        s_raw[i] = r[k - 1]
+                    else:
+                        s_raw[i] = r[-1] if q >= 0.5 else r[0]
+
+                s = np.zeros(len(Q_cal))
+                median_idx = np.argmin(np.abs(Q_cal - 0.5))
+                s[median_idx] = s_raw[median_idx]
+                for i in range(median_idx + 1, len(Q_cal)):
+                    s[i] = max(s_raw[i], s[i - 1])
+                for i in range(median_idx - 1, -1, -1):
+                    s[i] = min(s_raw[i], s[i + 1])
+                return s
+
+            if self.calibration_mode == "hybrid":
+                unique_calib_leaves, calib_counts = np.unique(self._calib_leaves_, return_counts=True)
+                min_calib = getattr(self, "hybrid_min_calib", 50)
+
+                large_leaves = unique_calib_leaves[calib_counts >= min_calib]
+                for leaf in large_leaves:
+                    mask = self._calib_leaves_ == leaf
+                    self.calibration_shifts_[leaf] = compute_shifts_for_group(self.y_calib_[mask], mask, leaf)
+
+                rest_mask = np.isin(self._calib_leaves_, large_leaves, invert=True)
+                if np.any(rest_mask):
+                    self.calibration_shifts_["rest"] = compute_shifts_for_group(
+                        self.y_calib_[rest_mask], rest_mask, "rest"
+                    )
+            else:
+                mask = np.ones(len(self.y_calib_), dtype=bool)
+                self.calibration_shifts_["global"] = compute_shifts_for_group(self.y_calib_, mask, "global")
+
     def predict(self, X):
         """
         Predict target mean for each sample (sklearn compatibility).
 
-        Returns the mean of the leaf ECDF for each sample. For
-        risk-aware predictions, use predict_distribution() to access
+        Returns the representative-point mean of the leaf ECDF for each sample. This
+        is not the exact mean of the predictive body distribution `G` or the spliced
+        distribution `H`. For risk-aware predictions, use predict_distribution() to
+        access the full distribution and query specific quantiles.
         the full distribution and query specific quantiles.
 
         Parameters
@@ -713,32 +817,76 @@ class DDTRegressor(
 
         # 2. Conformal quantile calibration
         if self.calibration_fraction > 0 and getattr(self, "y_calib_", None) is not None:
-            calib_preds = route.from_leaves(self._calib_leaves_, quantiles)
-
             if self.calibration_mode == "hybrid":
                 from . import _ddt_core
 
-                calib_leaves = self._calib_leaves_
                 X_q_test = self._preprocess_X(X)
                 test_leaves = _ddt_core.predict_leaves(self.tree_data_, X_q_test)
 
-                unique_calib_leaves, calib_counts = np.unique(calib_leaves, return_counts=True)
-                threshold = self.min_samples_leaf * 2
+            Q_cal = getattr(self, "_Q_cal_", None)
 
+            warned = False
             for q in quantiles:
-                residuals = self.y_calib_ - calib_preds[q]
-                s_global = np.quantile(residuals, q)
-
                 if self.calibration_mode == "hybrid":
-                    shifts = np.full(len(X), s_global, dtype=np.float64)
-                    for leaf, count in zip(unique_calib_leaves, calib_counts):
-                        if count >= threshold:
-                            leaf_mask = calib_leaves == leaf
-                            s_leaf = np.quantile(residuals[leaf_mask], q)
-                            shifts[test_leaves == leaf] = s_leaf
+                    shifts = np.zeros(len(X), dtype=np.float64)
+
+                    for leaf, s_grid in self.calibration_shifts_.items():
+                        if leaf == "rest":
+                            continue
+                        n = self.calibration_counts_[leaf]
+                        k = int(np.ceil((n + 1) * q)) if q >= 0.5 else int(np.floor((n + 1) * q))
+                        unres = q <= 0.0 or q >= 1.0 or (q >= 0.5 and k > n) or (q < 0.5 and k < 1)
+                        s_interp = np.interp(q, Q_cal, s_grid)
+                        if unres:
+                            if getattr(self, "calibration_strict", False):
+                                s_interp = np.inf if q >= 0.5 else -np.inf
+                            elif not warned:
+                                warnings.warn(
+                                    "Cannot resolve conformal quantile. Returning extreme residual.",
+                                    ConformalResolutionWarning,
+                                    stacklevel=2,
+                                )
+                                warned = True
+                        shifts[test_leaves == leaf] = s_interp
+
+                    if "rest" in self.calibration_shifts_:
+                        known_leaves = [k for k in self.calibration_shifts_.keys() if isinstance(k, (int, np.integer))]
+                        rest_mask = ~np.isin(test_leaves, known_leaves)
+                        if np.any(rest_mask):
+                            n = self.calibration_counts_["rest"]
+                            k = int(np.ceil((n + 1) * q)) if q >= 0.5 else int(np.floor((n + 1) * q))
+                            unres = q <= 0.0 or q >= 1.0 or (q >= 0.5 and k > n) or (q < 0.5 and k < 1)
+                            s_interp = np.interp(q, Q_cal, self.calibration_shifts_["rest"])
+                            if unres:
+                                if getattr(self, "calibration_strict", False):
+                                    s_interp = np.inf if q >= 0.5 else -np.inf
+                                elif not warned:
+                                    warnings.warn(
+                                        "Cannot resolve conformal quantile. Returning extreme residual.",
+                                        ConformalResolutionWarning,
+                                        stacklevel=2,
+                                    )
+                                    warned = True
+                            shifts[rest_mask] = s_interp
+
                     raw_preds[q] += shifts
                 else:
-                    raw_preds[q] += s_global
+                    s_grid = self.calibration_shifts_["global"]
+                    n = self.calibration_counts_["global"]
+                    k = int(np.ceil((n + 1) * q)) if q >= 0.5 else int(np.floor((n + 1) * q))
+                    unres = q <= 0.0 or q >= 1.0 or (q >= 0.5 and k > n) or (q < 0.5 and k < 1)
+                    s_interp = np.interp(q, Q_cal, s_grid)
+                    if unres:
+                        if getattr(self, "calibration_strict", False):
+                            s_interp = np.inf if q >= 0.5 else -np.inf
+                        elif not warned:
+                            warnings.warn(
+                                "Cannot resolve conformal quantile. Returning extreme residual.",
+                                ConformalResolutionWarning,
+                                stacklevel=2,
+                            )
+                            warned = True
+                    raw_preds[q] += s_interp
 
         return raw_preds
 
@@ -868,6 +1016,9 @@ class DDTRegressor(
 
     def _preprocess_X(self, X):
         """Validate and quantize feature matrix for prediction."""
+        X_raw = np.asarray(X, dtype=np.float64)
+        self._validate_no_nan_inf(X_raw, "X")
+
         if hasattr(self, "_validate_data"):
             X = self._validate_data(X, reset=False, dtype=np.float64)
         else:
@@ -888,7 +1039,7 @@ class DDTRegressor(
         if np.any(np.isnan(arr)):
             raise ValueError(f"{name} contains NaN values. DDT requires finite inputs.")
         if np.any(np.isinf(arr)):
-            raise ValueError(f"{name} contains Inf values. DDT requires finite inputs.")
+            raise ValueError(f"{name} contains inf values. DDT requires finite inputs.")
 
     @staticmethod
     def _get_l1_cache_size_bytes():
@@ -962,9 +1113,14 @@ class _Route:
         self.has_smooth_pmf = hasattr(estimator, "tree_state_") and getattr(
             estimator.tree_state_, "has_smooth_pmf", False
         )
-        self.has_evt = (estimator.evt_tails and "evt_enabled" in estimator.tree_data_) or (
-            getattr(estimator, "evt_tails_lower", False) and "evt_lower_enabled" in estimator.tree_data_
-        )
+        self.has_evt = getattr(estimator, "evt_active_", False) or getattr(estimator, "evt_lower_active_", False)
+        # Backwards compatibility for models pickled before v1.1.0
+        if not hasattr(estimator, "evt_active_"):
+            self.has_evt = (
+                self.has_evt
+                or (estimator.evt_tails and "evt_enabled" in estimator.tree_data_)
+                or (getattr(estimator, "evt_tails_lower", False) and "evt_lower_enabled" in estimator.tree_data_)
+            )
         self.fast_float = (
             getattr(estimator, "fast_inference", False) and "split_threshold_float" in estimator.tree_data_
         )
@@ -1002,6 +1158,7 @@ class _Route:
 
         q_array = np.array(quantiles, dtype=np.float64)
         X_arr = np.asarray(X, dtype=np.float64)
+        self.est._validate_no_nan_inf(X_arr, "X")
 
         if self.use_cpp:
             fq = self.est.feature_quantizer_
@@ -1071,83 +1228,26 @@ class _Route:
                 dist_lookup[leaf_idx] = _ddt_core.get_node_distribution(self.est.tree_data_, int(leaf_idx))
             dist = dist_lookup[leaf_ids]
 
-        raw_preds = self.est._predict_raw_quantiles(None, quantiles, distributions=dist)
-
         has_upper_evt = self.est.evt_tails and "evt_enabled" in self.est.tree_data_
         has_lower_evt = getattr(self.est, "evt_tails_lower", False) and "evt_lower_enabled" in self.est.tree_data_
 
-        if has_upper_evt or has_lower_evt:
-            leaf_indices = leaf_ids
+        if not (has_upper_evt or has_lower_evt):
+            return self.est._predict_raw_quantiles(None, quantiles, distributions=dist)
 
-            if has_upper_evt:
-                evt_enabled = self.est.tree_data_["evt_enabled"].astype(bool)
-                evt_F_u = self.est.tree_data_["evt_F_u"]
-                evt_gpd_shape = self.est.tree_data_["evt_gpd_shape"]
-                evt_gpd_scale = self.est.tree_data_["evt_gpd_scale"]
-                evt_threshold_u = self.est.tree_data_["evt_threshold_u"]
+        # exact body/EVT splice (NumPy mirror of
+        # ddt_core.hpp::quantiles_for_leaf; single implementation in _evt.py).
+        from ._evt import spliced_quantiles_from_dist
 
-            if has_lower_evt:
-                evt_lower_enabled = self.est.tree_data_["evt_lower_enabled"].astype(bool)
-                evt_lower_F_u = self.est.tree_data_["evt_lower_F_u"]
-                evt_lower_gpd_shape = self.est.tree_data_["evt_lower_gpd_shape"]
-                evt_lower_gpd_scale = self.est.tree_data_["evt_lower_gpd_scale"]
-                evt_lower_threshold_u = self.est.tree_data_["evt_lower_threshold_u"]
-
-            for q in quantiles:
-                raw = raw_preds[q].copy()
-
-                if has_upper_evt:
-                    evt_enabled_samples = evt_enabled[leaf_indices]
-                    evt_F_u_samples = evt_F_u[leaf_indices]
-
-                    mask = evt_enabled_samples & (q >= evt_F_u_samples)
-                    if mask.any():
-                        leaf_mask = leaf_indices[mask]
-                        u = evt_threshold_u[leaf_mask]
-                        F_u = evt_F_u_samples[mask]
-                        xi = evt_gpd_shape[leaf_mask]
-                        sigma = evt_gpd_scale[leaf_mask]
-
-                        if "evt_S_u" in self.est.tree_data_:
-                            S_u = self.est.tree_data_["evt_S_u"][leaf_mask]
-                            exceedance_prob = np.where(S_u > 0.0, (1.0 - q) / S_u, (1.0 - q) / (1.0 - F_u))
-                        else:
-                            exceedance_prob = (1.0 - q) / (1.0 - F_u)
-
-                        if q >= 1.0:
-                            raw[mask] = np.inf
-                        else:
-                            raw_upper = np.where(
-                                np.abs(xi) < 1e-6,
-                                u - sigma * np.log(exceedance_prob),
-                                u + (sigma / xi) * (np.power(exceedance_prob, -xi) - 1.0),
-                            )
-                            raw[mask] = raw_upper
-
-                if has_lower_evt:
-                    evt_lower_enabled_samples = evt_lower_enabled[leaf_indices]
-                    evt_lower_F_u_samples = evt_lower_F_u[leaf_indices]
-
-                    mask_lower = evt_lower_enabled_samples & (q <= evt_lower_F_u_samples)
-                    if mask_lower.any():
-                        leaf_mask_lower = leaf_indices[mask_lower]
-                        u_lower = evt_lower_threshold_u[leaf_mask_lower]
-                        F_u_lower = evt_lower_F_u_samples[mask_lower]
-                        xi = evt_lower_gpd_shape[leaf_mask_lower]
-                        sigma = evt_lower_gpd_scale[leaf_mask_lower]
-
-                        exceedance_prob = q / F_u_lower
-
-                        if q <= 0.0:
-                            raw[mask_lower] = -np.inf
-                        else:
-                            raw_lower = np.where(
-                                np.abs(xi) < 1e-6,
-                                u_lower + sigma * np.log(exceedance_prob),
-                                u_lower - (sigma / xi) * (np.power(exceedance_prob, -xi) - 1.0),
-                            )
-                            raw[mask_lower] = raw_lower
-
-                raw_preds[q] = raw
-
-        return raw_preds
+        res = spliced_quantiles_from_dist(
+            dist,
+            np.asarray(leaf_ids),
+            self.est.tree_data_,
+            quantiles,
+            self.bin_lo,
+            self.bin_width,
+            self.bin_rep,
+            self.interpolation == "snap",
+            bool(has_upper_evt),
+            bool(has_lower_evt),
+        )
+        return {q: res[float(q)] for q in quantiles}

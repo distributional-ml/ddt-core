@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ddt-core"
-version = "1.0.0"
-description = "Distributional Decision Trees: A fast, rigorous tree-based model for full distributional forecasting."
+version = "1.1.0"
+description = "Distributional Decision Trees: A fast tree-based model for distributional forecasting."
 authors = [
     {name = "Distributional ML Team"}
 ]
@@ -27,5 +27,14 @@ classifiers = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
-    "ruff>=0.1.0"
+    "ruff==0.16.*"
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "D"]
+ignore = ["D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107", "D203", "D212", "D205", "D400", "D415", "D401", "E501", "E402", "E741", "B017", "F821", "F841", "D417", "B007", "B023"]

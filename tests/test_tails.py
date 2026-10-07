@@ -287,7 +287,7 @@ class TestLowerTailIntegration:
 
         # EVT lower tail should extend further left than the histogram minimum
         # (it extrapolates beyond the training minimum using the GPD)
-        hist_min = float(y.min())
+        float(y.min())
         evt_p01 = float(preds_ev[0.01][0])
         # The EVT P01 should be at or below (more extreme than) the empirical P01
         empirical_p01 = float(np.percentile(y, 1))

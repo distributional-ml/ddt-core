@@ -31,7 +31,7 @@ def test_target_binner_log1p():
 
     assert np.isclose(binner.y_max_, np.log1p(1000))
 
-    y_q = binner.transform(y)
+    binner.transform(y)
 
     # Centers should be reconstructed using expm1
     centers = binner.inverse_transform_bin_centers()
@@ -60,7 +60,6 @@ def test_ddt_regressor_integration():
     # predict should return correctly scaled values (expm1 applied by inverse transform)
     preds = model.predict(X)
     assert np.max(preds) < 10  # Since 100 was clipped and we reconstruct via expm1
-
 
 
 from ddt import DDTRandomForestRegressor

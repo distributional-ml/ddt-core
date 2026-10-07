@@ -88,6 +88,69 @@ inline double wasserstein_1d_weighted(
     return w1;
 }
 
+// -----------------------------------------------------------------------------
+// Split weighting
+// -----------------------------------------------------------------------------
+// With W = sum_b delta_b |F_L(b) - F_R(b)| and delta_b the (normalised) bin width
+// (1 for equal-width bins):
+//   None : W                                              (unchanged, bit-identical)
+//   Sqrt : sqrt(n_L n_R / N) * W / B
+//   Crps : (n_L n_R / N) * sum_b (delta_b / B) (F_L(b) - F_R(b))^2 / N_root
+// Crps is the exact CRPS impurity decrease n I(F) - n_L I(F_L) - n_R I(F_R) with
+// I = integral F(1-F); dividing by N_root makes min_divergence_decrease a
+// fraction of the root impurity scale.
+enum class SplitWeighting : int { None = 0, Sqrt = 1, Crps = 2 };
+
+inline SplitWeighting parse_split_weighting(const std::string& s)
+{
+    if (s.empty() || s == "none") return SplitWeighting::None;
+    if (s == "sqrt") return SplitWeighting::Sqrt;
+    if (s == "crps") return SplitWeighting::Crps;
+    throw std::invalid_argument("split_weighting must be one of 'none', 'sqrt', 'crps'");
+}
+
+// Gain of one candidate split.  `delta == nullptr` means unit bin widths.
+// SplitWeighting::None dispatches to the original kernels unchanged.
+inline double split_gain(SplitWeighting mode,
+                         const int* left, int n_left,
+                         const int* right, int n_right,
+                         const double* delta, int B, int n_root)
+{
+    if (mode == SplitWeighting::None) {
+        return delta != nullptr
+            ? wasserstein_1d_weighted(left, n_left, right, n_right, delta, B)
+            : wasserstein_1d(left, n_left, right, n_right, B);
+    }
+    if (n_left == 0 || n_right == 0) return 0.0;
+
+    const double inv_left  = 1.0 / static_cast<double>(n_left);
+    const double inv_right = 1.0 / static_cast<double>(n_right);
+    const double inv_B     = 1.0 / static_cast<double>(B);
+    const double nl = static_cast<double>(n_left);
+    const double nr = static_cast<double>(n_right);
+    const double pair_scale = nl * nr / (nl + nr);
+
+    double cdf_left = 0.0, cdf_right = 0.0, acc = 0.0;
+    if (mode == SplitWeighting::Sqrt) {
+        for (int b = 0; b < B; ++b) {
+            cdf_left  += left[b]  * inv_left;
+            cdf_right += right[b] * inv_right;
+            const double d = (delta != nullptr) ? delta[b] : 1.0;
+            acc += d * std::abs(cdf_left - cdf_right);
+        }
+        return std::sqrt(pair_scale) * acc * inv_B;
+    }
+    for (int b = 0; b < B; ++b) {
+        cdf_left  += left[b]  * inv_left;
+        cdf_right += right[b] * inv_right;
+        const double diff = cdf_left - cdf_right;
+        const double d = (delta != nullptr) ? delta[b] : 1.0;
+        acc += d * diff * diff;
+    }
+    const double root = static_cast<double>(n_root > 0 ? n_root : 1);
+    return pair_scale * acc * inv_B / root;
+}
+
 // =============================================================================
 // Tree (Data-Oriented Design: Struct of Arrays)
 // =============================================================================
@@ -286,7 +349,9 @@ SplitResult find_best_split(
     int n_bins,
     int min_samples_leaf,
     SplitWorkspace& ws,
-    const char* feature_mask = nullptr
+    const char* feature_mask = nullptr,
+    SplitWeighting split_weighting = SplitWeighting::None,
+    int n_root = 0                                          // root sample count (Crps)
 );
 
 // Build a complete decision tree from quantized data using Struct of Arrays.
@@ -303,7 +368,8 @@ Tree build_tree(
     int min_samples_leaf,
     double min_divergence_decrease,
     const std::string& divergence_name,
-    const int* max_splits_per_feature = nullptr
+    const int* max_splits_per_feature = nullptr,
+    SplitWeighting split_weighting = SplitWeighting::None
 );
 
 // Build a tree with variable-width bin Wasserstein (weighted path).
@@ -320,7 +386,8 @@ Tree build_tree_weighted(
     double min_divergence_decrease,
     const std::string& divergence_name,
     const double* delta_x_norm,
-    const int* max_splits_per_feature = nullptr
+    const int* max_splits_per_feature = nullptr,
+    SplitWeighting split_weighting = SplitWeighting::None
 );
 
 // Predict the leaf node index for a single sample.
@@ -391,8 +458,44 @@ inline double invert_cdf(const CdfT* cdf, int B, double thr,
     return bin_lo[b] + frac * bin_width[b];
 }
 
+// Forward evaluation of the uniform-within-bin CDF that invert_cdf inverts
+// Returns the NORMALISED value in [0, 1].
+//
+//   cdf[0..B-1]  non-decreasing cumulative mass, T = cdf[B-1] > 0
+//   bin_lo/width lower edge / width of every bin (width may be nullptr == all 0)
+//
+// Atoms (width == 0) are right-continuous: G(x) includes the atom's mass for
+// x >= bin_lo[b].  Requires bin_lo to be non-decreasing.
+template <typename CdfT>
+inline double eval_cdf(const CdfT* cdf, int B, double x,
+                       const double* bin_lo, const double* bin_width) noexcept
+{
+    if (B <= 0) return 0.0;
+    const double T = static_cast<double>(cdf[B - 1]);
+    if (!(T > 0.0)) return 0.0;
+
+    int b = static_cast<int>(std::upper_bound(bin_lo, bin_lo + B, x) - bin_lo) - 1;
+    if (b < 0) b = 0;
+    if (b >= B) b = B - 1;
+
+    const double prev = (b > 0) ? static_cast<double>(cdf[b - 1]) : 0.0;
+    const double w    = (bin_width != nullptr) ? bin_width[b] : 0.0;
+    double frac;
+    if (w <= 0.0) {
+        frac = (x >= bin_lo[b]) ? 1.0 : 0.0;
+    } else {
+        frac = (x - bin_lo[b]) / w;
+        if (frac < 0.0) frac = 0.0;
+        if (frac > 1.0) frac = 1.0;
+    }
+    double g = (prev + frac * (static_cast<double>(cdf[b]) - prev)) / T;
+    if (g < 0.0) g = 0.0;
+    if (g > 1.0) g = 1.0;
+    return g;
+}
+
 // Monolithic C++ inference function for fast quantile prediction.
-// `grid` is required (: quantiles are produced by invert_cdf over
+// `grid` is required (quantiles are produced by invert_cdf over
 // (bin_lo, bin_width) and bin_rep is the point representative.  Each of the three
 // arrays must have n_target_bins entries.
 void predict_quantiles_fast(
@@ -558,6 +661,8 @@ struct NoEVT {
     inline bool lower_active(int /*node*/) const noexcept { return false; }
     inline double f_u(int /*node*/)        const noexcept { return 2.0;  } // sentinel > 1
     inline double f_u_lower(int /*node*/)  const noexcept { return -1.0; } // sentinel < 0
+    inline double threshold_u(int /*node*/)       const noexcept { return 0.0; }
+    inline double threshold_lower(int /*node*/)   const noexcept { return 0.0; }
     inline double query_upper(double /*q*/, int /*node*/) const noexcept { return 0.0; }
     inline double query_lower(double /*q*/, int /*node*/) const noexcept { return 0.0; }
 };
@@ -699,7 +804,11 @@ struct TreeViewSmoothEVT {
 inline double gpd_upper_quantile(double q, double u, double F_u,
                                  double S_u, double xi, double sigma) noexcept
 {
-    if (q >= 1.0) return std::numeric_limits<double>::infinity();
+    if (q >= 1.0) {
+        // Bounded support (xi < 0): finite right endpoint u - sigma/xi.
+        if (xi < -1e-6) return u - sigma / xi;
+        return std::numeric_limits<double>::infinity();
+    }
 
     // Compute exceedance probability with survival-precision branch (Phase 3).
     // S_u == 0.0 is the sentinel meaning "not yet computed" (old pickled model).
@@ -725,7 +834,11 @@ inline double gpd_upper_quantile(double q, double u, double F_u,
 inline double gpd_lower_quantile(double q, double u_lower, double F_u_lower,
                                  double xi, double sigma) noexcept
 {
-    if (q <= 0.0) return -std::numeric_limits<double>::infinity();
+    if (q <= 0.0) {
+        // Bounded support (xi < 0): finite left endpoint u_lower + sigma/xi.
+        if (xi < -1e-6) return u_lower + sigma / xi;
+        return -std::numeric_limits<double>::infinity();
+    }
     if (F_u_lower <= 0.0) return -std::numeric_limits<double>::infinity();
 
     double exceedance_prob = q / F_u_lower;
@@ -766,6 +879,8 @@ struct WithEVT {
     }
     inline double f_u(int n)       const noexcept { return evt_F_u[n]; }
     inline double f_u_lower(int n) const noexcept { return evt_lower_F_u[n]; }
+    inline double threshold_u(int n)     const noexcept { return evt_threshold_u[n]; }
+    inline double threshold_lower(int n) const noexcept { return evt_lower_threshold_u[n]; }
 
     inline double query_upper(double q, int n) const noexcept {
         double s_u = (evt_S_u != nullptr) ? evt_S_u[n] : 0.0;
@@ -804,6 +919,15 @@ struct CdfScratch {
 //   leaf-id path   : out = out_results + i * Q,    out_stride = 1          -> (N, Q)
 //
 // Body is invert_cdf over (bin_lo, bin_width); empty leaves return population_mean.
+//
+// Exact body/EVT splice.  When a tail is active the body CDF is
+// affinely re-indexed so the body quantile function ends EXACTLY at the GPD
+// threshold(s):
+//     q' = g_l + (q - F_l) * (g_u - g_l) / (F_u - F_l)
+// where g_l = G(u_l), g_u = G(u) are the body CDF values at the thresholds and
+// F_l / F_u are the raw leaf empirical tail probabilities.  This makes the
+// quantile function continuous and non-decreasing across the junction.  With no
+// active tail q' == q and the output is bit-identical to the plain path.
 template <typename PMFPolicy, typename EVTPolicy>
 inline void quantiles_for_leaf(
     const PMFPolicy&     pmf,
@@ -834,6 +958,38 @@ inline void quantiles_for_leaf(
         return;
     }
 
+    // ---- Splice constants (computed once per leaf) ----
+    // Defaults for an inactive tail: F_l = 0, g_l = 0, F_u = 1, g_u = 1.
+    double F_l = 0.0, g_l = 0.0, F_u = 1.0, g_u = 1.0;
+    double u_l = 0.0, u_u = 0.0;
+    bool   splice = false;
+    bool   bridge = false;  // degenerate body: g_u <= g_l -> linear bridge
+    double x_lo_end = 0.0, x_hi_end = 0.0;
+    if constexpr (EVTPolicy::has_evt) {
+        if (up_active || lo_active) {
+            splice = true;
+            if (lo_active) {
+                F_l = fu_lo;
+                u_l = evt.threshold_lower(leaf);
+                g_l = eval_cdf(cdf_buf, n_target_bins, u_l, grid.bin_lo, grid.bin_width);
+            }
+            if (up_active) {
+                F_u = fu;
+                u_u = evt.threshold_u(leaf);
+                g_u = eval_cdf(cdf_buf, n_target_bins, u_u, grid.bin_lo, grid.bin_width);
+            }
+            if (!(g_u > g_l) || !(F_u > F_l)) {
+                bridge = true;
+                x_lo_end = lo_active ? u_l
+                    : invert_cdf(cdf_buf, n_target_bins, 0.0, grid.bin_lo, grid.bin_width);
+                x_hi_end = up_active ? u_u
+                    : invert_cdf(cdf_buf, n_target_bins, total, grid.bin_lo, grid.bin_width);
+                if (x_hi_end < x_lo_end) x_hi_end = x_lo_end;
+            }
+        }
+    }
+    (void)splice; (void)bridge; (void)x_lo_end; (void)x_hi_end;
+
     for (int qi = 0; qi < num_quantiles; ++qi) {
         double q = quantiles[qi];
         if constexpr (EVTPolicy::has_evt) {
@@ -843,6 +999,18 @@ inline void quantiles_for_leaf(
             }
             if (lo_active && q <= fu_lo) {
                 out[qi * out_stride] = evt.query_lower(q, leaf);
+                continue;
+            }
+            if (splice) {
+                if (bridge) {
+                    const double den = F_u - F_l;
+                    const double t = (den > 0.0) ? (q - F_l) / den : 0.0;
+                    out[qi * out_stride] = x_lo_end + t * (x_hi_end - x_lo_end);
+                    continue;
+                }
+                const double qp = g_l + (q - F_l) * (g_u - g_l) / (F_u - F_l);
+                out[qi * out_stride] = invert_cdf(cdf_buf, n_target_bins, qp * total,
+                                                  grid.bin_lo, grid.bin_width);
                 continue;
             }
         }

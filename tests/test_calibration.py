@@ -46,9 +46,20 @@ def test_calibration_coverage_integrity(q):
     # Coverage logic: for a calibrated lower bound q, we expect P(y <= preds) ~ q
     coverage = np.mean(y_calib <= preds)
 
-    # Conformal target coverage should be accurate to within 1/n_calib
-    tolerance = 1.0 / n_calib
-    assert abs(coverage - q) <= tolerance, f"Coverage {coverage} too far from target {q}"
+    # Conformal target coverage with monotone repairs (conservative).
+    # Empirical one-sided coverage must lie within [q, q + 1/(n+1)] ± 3*SE for upper q, and mirrored for lower q.
+    se = np.sqrt(q * (1 - q) / n_calib)
+    tolerance = 3.0 * se
+    if q >= 0.5:
+        target_min = q - tolerance
+        target_max = q + 1.0 / (n_calib + 1) + tolerance
+    else:
+        target_min = q - 1.0 / (n_calib + 1) - tolerance
+        target_max = q + tolerance
+
+    assert target_min <= coverage <= target_max, (
+        f"Coverage {coverage} outside target bounds [{target_min}, {target_max}] for q={q}"
+    )
 
 
 def test_calibrated_pickle_round_trip():

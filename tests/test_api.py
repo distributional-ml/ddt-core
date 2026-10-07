@@ -1,5 +1,5 @@
 """
-DDT Smoke Tests — Phase 1 Gate Validation
+DDT Smoke Tests — Phase 1 Gate Validation.
 ===========================================
 Minimal tests to confirm the core engine works end-to-end:
     - fit/predict runs without errors
@@ -331,8 +331,9 @@ class TestTreeSimplification:
 
 class TestPipelineStateGuards:
     def test_valid_order_succeeds(self):
-        from ddt import DDTRegressor
         from ddt._pipeline import PipelineStage
+
+        from ddt import DDTRegressor
 
         X, y = make_synthetic_data(n_samples=500)
         model = DDTRegressor(max_depth=3, min_samples_leaf=10, smooth_leaves=True).fit(X, y)
@@ -358,8 +359,9 @@ class TestPickleSmoothedState:
     def test_pickle_preserves_smoothed_pmf(self):
         import pickle
 
-        from ddt import DDTRegressor
         from ddt._pipeline import PipelineStage
+
+        from ddt import DDTRegressor
 
         X, y = make_synthetic_data(n_samples=500)
         model = DDTRegressor(max_depth=3, min_samples_leaf=10, smooth_leaves=True).fit(X, y)
