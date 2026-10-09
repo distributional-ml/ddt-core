@@ -243,9 +243,9 @@ class TargetBinner:
     target_transform : str or None, default=None
         Transform applied to y before binning. Options: ``'log1p'`` or ``None``.
         Cannot be combined with ``bin_strategy='log_width'`` or ``'manual'``.
-    winsorize_tails : float or None, default=0.001
-        Fraction of data clipped from both tails before binning (e.g. 0.001 clips
-        P0.1 and P99.9). Must be in (0, 0.5). Pass ``None`` to disable.
+    winsorize_tails : float or None, default=1e-4
+        Fraction of data clipped from both tails before binning (e.g. 1e-4 clips
+        P0.01 and P99.99). Must be in (0, 0.5). Pass ``None`` to disable.
         Note: ``winsorize_tails=0.0`` is invalid — use ``None`` to disable.
     bin_strategy : str, default="equal_width"
         Bin edge strategy. One of ``"equal_width"``, ``"log_width"``, ``"manual"``.
@@ -303,7 +303,7 @@ class TargetBinner:
         self,
         n_bins: int = 30,
         target_transform: str = None,
-        winsorize_tails: float = 0.001,
+        winsorize_tails: float = 1e-4,
         bin_strategy: str = "equal_width",
         manual_bin_edges: np.ndarray = None,
         core_fraction: float = 0.5,

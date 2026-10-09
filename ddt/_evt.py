@@ -50,7 +50,7 @@ def _select_k(N: int, tail_fraction: float | str, min_k: int = 5) -> int:
 def fit_gpd_upper_tail(
     leaf_values: np.ndarray,
     min_evt_samples: int = 30,
-    tail_fraction: float = 0.05,
+    tail_fraction: float | str = "auto",
     evt_borrow_factor: float = 1.0,
     evt_gof_alpha: float = 0.05,
 ):
@@ -94,7 +94,7 @@ def fit_gpd_upper_tail(
 def fit_gpd_lower_tail(
     leaf_values: np.ndarray,
     min_evt_samples: int = 30,
-    tail_fraction: float = 0.05,
+    tail_fraction: float | str = "auto",
     evt_borrow_factor: float = 1.0,
     evt_gof_alpha: float = 0.05,
 ):
@@ -241,8 +241,8 @@ def fit_all_leaf_gpds(
     feature_quantizer,
     X_q: np.ndarray,
     min_samples: int = 30,
-    tail_fraction: float = 0.05,
-    tail_fraction_lower: float = 0.05,
+    tail_fraction: float | str = "auto",
+    tail_fraction_lower: float | str = "auto",
     fit_lower_tail: bool = False,
 ) -> dict:
     """

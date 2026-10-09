@@ -194,7 +194,7 @@ class DDTRegressor(
         compact_inference=False,
         fast_inference=False,
         max_splits_per_feature=None,
-        split_weighting="crps",
+        split_weighting="none",
         quantile_interpolation="linear",
         atom_threshold=0.9,
         evt_borrow_factor=1.0,

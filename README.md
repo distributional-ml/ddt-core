@@ -8,23 +8,6 @@ DDT builds a tree using differences between child target distributions. Each lea
 
 The value proposition is the combination: **distribution-sensitive partitions, flexible leaf distributions, inspectable rules, and a C++ histogram engine designed to keep the representation affordable.**
 
-## Tested capabilities
-
-DDT provides competitive quantile accuracy with an extremely low inference cost, demonstrating the value of its C++ histogram engine and dynamic binning strategies.
-
-### Extremely Fast Inference
-On the ICON electricity dataset, batch-one prediction latency (the median of 25 calls on already prepared numeric inputs) for forecasting a full distribution is evaluated:
-- **DDT-Upper-EVT**: 72.1 µs
-- **CatBoost**: 712.5 µs
-- **LightGBM**: 18,561.6 µs
-
-### Conditional Distribution Accuracy
-In the Diamonds dataset, the `sqrt` split weighting and hierarchical smoothing yield the following results (lower is better):
-- **DDT-Diamonds-Sqrt**: Mean pinball 185.881
-- **DDT-Hybrid**: Mean pinball 493.964
-
-While stronger competitors like CatBoost (111.721) and LightGBM (117.267) currently achieve lower mean pinball loss on this task, DDT's configurable tail routing (EVT) and smoothing (Dirichlet) substantially improve predictive scores over the unregularized empirical baseline, while maintaining sub-millisecond latency. On the ICON electricity dataset, enabling the upper Generalized Pareto Distribution (GPD) tail model reduces the P95 pinball loss from 3.649 to 3.200.
-
 ## What this makes useful
 
 | Need | What DDT provides | Evidence to look for |
